@@ -40,6 +40,11 @@ class LLMResponse(BaseModel):
 
 
 class BaseLLMClient(ManagedClient, ABC):
+    @property
+    @abstractmethod
+    def provider(self) -> str:
+        """Provider identity used when validating a client's configuration."""
+
     def __init__(self, model: str) -> None:
         self.model = model
 
@@ -65,6 +70,8 @@ class BaseLLMClient(ManagedClient, ABC):
 
 
 class MockLLMClient(BaseLLMClient):
+    provider = "mock"
+
     def __init__(
         self,
         model: str = "mock-llm-v1",
@@ -99,6 +106,8 @@ class _ChatCompletion(BaseModel):
 
 
 class OpenAICompatibleLLMClient(BaseLLMClient):
+    provider = "openai_compatible"
+
     def __init__(self, settings: LLMSettings, *, http_client: httpx.Client | None = None) -> None:
         super().__init__(settings.model)
         self._generation_parameters = settings.model_dump(

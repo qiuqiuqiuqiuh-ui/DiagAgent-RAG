@@ -36,7 +36,7 @@ class DiagnosticRequest(BaseModel):
 
 
 class FaultCodeRule(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     equipment_id: NonBlank
     fault_code: NonBlank
@@ -47,13 +47,13 @@ class FaultCodeRule(BaseModel):
 
 
 class SensorThresholdRule(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     equipment_id: NonBlank
     sensor: NonBlank
     unit: NonBlank
-    warning_threshold: FiniteFloat
-    critical_threshold: FiniteFloat
+    warning_threshold: Reading
+    critical_threshold: Reading
     direction: Literal["high", "low"]
 
     @model_validator(mode="after")

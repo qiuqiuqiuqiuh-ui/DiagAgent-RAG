@@ -8,7 +8,7 @@ from langgraph.graph import END, START, StateGraph
 from langsmith import tracing_context
 from typing_extensions import TypedDict
 
-from src.agents.citations import CitationError, validate_citations
+from src.agents.citations import CitationError, bind_citations
 from src.agents.policy import (
     DiagnosticPolicy,
     EvidenceContext,
@@ -25,6 +25,7 @@ from src.agents.schemas import (
     Intent,
     NodeName,
     NodeTrace,
+    SensorFinding,
     StateTransition,
     ToolFinding,
 )
@@ -131,6 +132,19 @@ def _tool_issues(findings: tuple[ToolFinding, ...]) -> tuple[str, ...]:
     return tuple(missing)
 
 
+def _recommend_escalation(findings: tuple[ToolFinding, ...]) -> str | None:
+    recommendations: list[str] = []
+    for finding in findings:
+        if isinstance(finding, FaultCodeFinding) and finding.status == "found" and finding.rule:
+            recommendations.append(finding.rule.escalation.rstrip(".") + ".")
+        elif isinstance(finding, SensorFinding) and finding.status == "critical" and finding.rule:
+            recommendations.append(
+                f"Escalate the critical {finding.sensor} reading on {finding.rule.equipment_id} "
+                "to qualified maintenance."
+            )
+    return " ".join(dict.fromkeys(recommendations)) or None
+
+
 class DiagnosticWorkflow:
     """Run the typed diagnosis graph with injected retrieval, tools, and model policy."""
 
@@ -166,11 +180,10 @@ class DiagnosticWorkflow:
         self._graph = graph.compile()
 
     def invoke(self, request: DiagnosticRequest, *, include_trace: bool = True) -> DiagnosticResult:
-        trace_context = (
-            tracing_context(enabled=False)
-            if isinstance(self._policy, MockDiagnosticPolicy)
-            else nullcontext()
+        offline_policy = isinstance(self._policy, MockDiagnosticPolicy) or (
+            isinstance(self._policy, LLMDiagnosticPolicy) and self._policy.uses_mock_client
         )
+        trace_context = tracing_context(enabled=False) if offline_policy else nullcontext()
         with trace_context:
             state = self._graph.invoke({"request": request})
         result: DiagnosticResult = state["result"]
@@ -257,10 +270,9 @@ class DiagnosticWorkflow:
         issue = state.get("evidence_issue")
         answer = ""
         citations: tuple[Citation, ...] = ()
-        if issue is None:
+        if issue is None and not _tool_issues(context.tool_findings):
             try:
-                answer = self._policy.synthesize(context)
-                citations = validate_citations(answer, context.chunks)
+                answer, citations = bind_citations(self._policy.synthesize(context), context.chunks)
             except CitationError as exc:
                 issue = str(exc)
             except ModelClientError:
@@ -274,11 +286,12 @@ class DiagnosticWorkflow:
 
     def _critique(self, state: DiagnosticState) -> DiagnosticUpdate:
         context = state["context"]
+        tool_issues = _tool_issues(context.tool_findings)
+        if tool_issues:
+            return {"result": _abstention(context.intent, tool_issues, context.tool_findings)}
         issue = state.get("evidence_issue")
-        problems = (issue,) if issue else ()
-        problems += _tool_issues(context.tool_findings)
-        if problems:
-            assessment = CriticAssessment(sufficient=False, missing_aspects=problems)
+        if issue:
+            assessment = CriticAssessment(sufficient=False, missing_aspects=(issue,))
         else:
             try:
                 assessment = self._policy.critique(context, state["answer"], state["citations"])
@@ -296,6 +309,7 @@ class DiagnosticWorkflow:
                     answer=state["answer"],
                     citations=state["citations"],
                     tool_findings=context.tool_findings,
+                    escalation_recommendation=_recommend_escalation(context.tool_findings),
                 )
             }
 
@@ -321,6 +335,11 @@ def create_diagnostic_workflow(
     initial_top_k: int = 5,
 ) -> DiagnosticWorkflow:
     policy: DiagnosticPolicy
+    if llm_client is not None and (llm_client.provider, llm_client.model) != (
+        settings.llm.provider,
+        settings.llm.model,
+    ):
+        raise ConfigurationError("LLM client provider and model must match the diagnostic profile")
     if settings.llm.provider == "mock":
         policy = MockDiagnosticPolicy(settings.domain)
     elif llm_client is not None:

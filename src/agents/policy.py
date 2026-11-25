@@ -47,7 +47,7 @@ _ALIASES = {
     "thresholds": "threshold",
 }
 _BRACKETS = str.maketrans("[]", "()")
-_JSON_FENCE = re.compile(r"```(?:json)?\s*\n(.*?)\n```", re.DOTALL | re.IGNORECASE)
+_JSON_FENCE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
 Response = TypeVar("Response", bound=BaseModel)
 
 
@@ -85,14 +85,19 @@ def _terms(text: str, *, include_components: bool = False) -> set[str]:
 def _extractive_draft(context: EvidenceContext) -> tuple[str, set[str]]:
     request = context.request
     focus = _terms(request.query)
-    focus.update(tokenize_codes(request.fault_code or ""))
+    fault_terms = set(tokenize_codes(request.fault_code or ""))
+    focus.update(fault_terms)
     asset_terms = set(tokenize_codes(context.equipment_id or ""))
     focus.update(asset_terms)
-    focus.update(term.casefold() for term in request.sensor_readings)
+    for sensor in request.sensor_readings:
+        focus.update(_terms(sensor))
     remaining = focus.copy()
+    numeric_labels = {term for term in asset_terms | fault_terms if term.isdecimal()}
     candidates = []
     for chunk in context.chunks:
         terms = _terms(chunk.retrieval_text, include_components=True)
+        if numeric_labels:
+            terms.update(numeric_labels.intersection(tokenize_codes(chunk.retrieval_text)))
         if context.intent != "parameter_lookup" or asset_terms <= terms:
             candidates.append((chunk, terms))
     selected: list[Chunk] = []
@@ -170,6 +175,10 @@ class LLMDiagnosticPolicy:
     def __init__(self, client: BaseLLMClient, domain: DomainSettings) -> None:
         self._client = client
         self._domain = domain
+
+    @property
+    def uses_mock_client(self) -> bool:
+        return self._client.provider == "mock"
 
     def _complete(self, instructions: str, payload: str, schema: type[Response]) -> Response:
         system = (

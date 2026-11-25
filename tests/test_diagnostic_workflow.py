@@ -6,12 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from src.agents.citations import CitationError, validate_citations
-from src.agents.policy import LLMDiagnosticPolicy
+from src.agents.citations import CitationError, bind_citations, validate_citations
+from src.agents.policy import EvidenceContext, LLMDiagnosticPolicy, MockDiagnosticPolicy
 from src.agents.schemas import DiagnosticRequest, DiagnosticResult, FaultCodeFinding, SensorFinding
 from src.agents.tools import DiagnosticTools
 from src.agents.workflow import DiagnosticWorkflow, create_diagnostic_workflow
 from src.core.embedding import create_embedding_client
+from src.core.exceptions import ConfigurationError
 from src.core.llm import ChatMessage, MockLLMClient
 from src.core.reranker import create_reranker
 from src.core.settings import DomainSettings, IngestionSettings, Settings, load_settings
@@ -69,6 +70,7 @@ def test_mock_workflow_answers_and_traces_all_nodes_without_network(
     assert "data/raw" not in result.citations[0].source_path
     assert isinstance(result.tool_findings[0], FaultCodeFinding)
     assert result.tool_findings[0].status == "found"
+    assert result.escalation_recommendation == "Electrical maintenance for repeat trips."
     assert result.trace is not None and result.trace.retry_count == 0
     assert tuple(step.node for step in result.trace.nodes) == NODES
     assert all(step.latency_ms >= 0 for step in result.trace.nodes)
@@ -134,6 +136,7 @@ def test_ambiguous_sensor_reading_requires_equipment_identification(
         "documented threshold for sensor winding_temp" in item for item in result.missing_aspects
     )
     assert result.tool_findings[0].status == "ambiguous"
+    assert result.trace is not None and result.trace.retry_count == 0
 
 
 class RecordingRetriever:
@@ -261,3 +264,85 @@ def test_invalid_model_routing_fails_closed_without_retrieval() -> None:
     assert isinstance(result, DiagnosticResult)
     assert result.status == "insufficient_evidence" and result.intent is None
     assert retriever.calls == []
+
+
+@pytest.mark.parametrize("equipment", [None, "CV-40"])
+def test_tool_blocker_skips_model_synthesis_and_retrieval_retries(
+    chunk: Chunk, equipment: str | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class BlockNetwork:
+        def __call__(self, *args: object, **kwargs: object) -> None:
+            raise AssertionError("Mock LLM must run without network calls")
+
+    monkeypatch.setattr(socket.socket, "connect", BlockNetwork())
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "mock-cannot-use-network")
+    calls = []
+
+    def respond(messages: Sequence[ChatMessage]) -> str:
+        calls.append(messages[0].content)
+        assert "Classify the request" in calls[-1]
+        return '```json {"intent":"fault_diagnosis"} ```'
+
+    retriever = RecordingRetriever([chunk])
+    workflow = DiagnosticWorkflow(
+        retriever,
+        DiagnosticTools.from_corpus(ROOT / "data" / "raw"),
+        LLMDiagnosticPolicy(MockLLMClient(responder=respond), DOMAIN),
+    )
+    result = workflow.invoke(
+        DiagnosticRequest(
+            query="Check winding_temp",
+            equipment_id=equipment,
+            sensor_readings={"winding_temp": 118},
+        )
+    )
+    assert result.status == "insufficient_evidence"
+    assert result.trace is not None and result.trace.retry_count == 0
+    assert len(retriever.calls) == len(calls) == 1
+
+
+def test_workflow_factory_validates_injected_llm_provider_and_model() -> None:
+    settings = load_settings(project_root=ROOT, env_file=None)
+    with pytest.raises(ConfigurationError, match="provider and model"):
+        create_diagnostic_workflow(
+            settings, RecordingRetriever(), llm_client=MockLLMClient("wrong")
+        )
+    settings.llm.provider = "openai_compatible"
+    with pytest.raises(ConfigurationError, match="provider and model"):
+        create_diagnostic_workflow(settings, RecordingRetriever(), llm_client=MockLLMClient())
+
+
+def test_citation_binding_canonicalizes_spacing_groups_and_known_units(chunk: Chunk) -> None:
+    second = chunk.model_copy(update={"chunk_id": "vfd.pdf#s0#c1", "chunk_index": 1})
+    answer, citations = bind_citations(
+        f"Pressure [bar] from [ {chunk.chunk_id} , {second.chunk_id} ].",
+        [chunk, second],
+    )
+    assert answer == f"Pressure (bar) from [{chunk.chunk_id}] [{second.chunk_id}]."
+    assert [citation.chunk_id for citation in citations] == [chunk.chunk_id, second.chunk_id]
+    with pytest.raises(CitationError):
+        bind_citations(f"Pressure [{chunk.chunk_id}, invented].", [chunk])
+
+
+def test_mock_policy_matches_sensor_alias_and_numeric_asset_label() -> None:
+    chunks = chunk_sections(
+        "rules.md",
+        [Section(title="1001 motor", text="The temperature warning threshold is 105 degC.")],
+        IngestionSettings(chunk_size=100, chunk_overlap=0),
+    )
+    request = DiagnosticRequest(
+        query="What is the temperature threshold?",
+        equipment_id="1001",
+        sensor_readings={"temp": 108},
+    )
+    context = EvidenceContext(
+        request=request,
+        intent="parameter_lookup",
+        equipment_id="1001",
+        chunks=chunks,
+        tool_findings=(),
+    )
+    policy = MockDiagnosticPolicy(DOMAIN)
+    answer = policy.synthesize(context)
+    assert policy.critique(context, answer, validate_citations(answer, chunks)).sufficient

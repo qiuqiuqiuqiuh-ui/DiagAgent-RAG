@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -76,11 +77,56 @@ def test_rule_loader_rejects_bad_threshold_order_and_duplicate_rules(tmp_path: P
     )
     with pytest.raises(CorpusError, match="Critical threshold must be beyond"):
         DiagnosticTools.from_corpus(tmp_path)
-
     rows = (CORPUS / "fault_codes.csv").read_text(encoding="utf-8").splitlines()
     (tmp_path / "fault_codes.csv").write_text("\n".join([*rows, rows[1]]), encoding="utf-8")
     path.unlink()
     with pytest.raises(CorpusError, match="Duplicate rule for VFD-OC3"):
+        DiagnosticTools.from_corpus(tmp_path)
+
+
+def test_rule_loader_requires_existing_corpus_root(tmp_path: Path) -> None:
+    with pytest.raises(CorpusError, match="Corpus directory does not exist"):
+        DiagnosticTools.from_corpus(tmp_path / "missing")
+    assert DiagnosticTools.from_corpus(tmp_path).evaluate(DiagnosticRequest(query="Motor")) == ()
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"warning_threshold": False, "critical_threshold": True},
+        {"warning_threshold": float("nan")},
+        {"critical_threshold": float("inf")},
+        {"warning_threshhold": 105},
+    ],
+)
+def test_sensor_rules_reject_invalid_values_and_unknown_fields(
+    tmp_path: Path, overrides: dict[str, object]
+) -> None:
+    record = {
+        "equipment_id": "MX-200",
+        "sensor": "temp",
+        "unit": "degC",
+        "warning_threshold": 105,
+        "critical_threshold": 120,
+        "direction": "high",
+    }
+    path = tmp_path / "sensor_thresholds.json"
+    path.write_text(json.dumps([record]), encoding="utf-8")
+    tools = DiagnosticTools.from_corpus(tmp_path)
+    (finding,) = tools.evaluate(DiagnosticRequest(query="MX-200", sensor_readings={"temp": 105}))
+    assert finding.status == "warning"
+    path.write_text(json.dumps([{**record, **overrides}]), encoding="utf-8")
+    with pytest.raises(CorpusError, match="Invalid rule table sensor_thresholds.json"):
+        DiagnosticTools.from_corpus(tmp_path)
+
+
+def test_fault_rule_rejects_extra_csv_column(tmp_path: Path) -> None:
+    (tmp_path / "fault_codes.csv").write_text(
+        "equipment_id,fault_code,severity,meaning,first_check,escalation,typo\n"
+        "A1,F1,alarm,sample,inspect,notify,x\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(CorpusError, match="Invalid rule table fault_codes.csv"):
         DiagnosticTools.from_corpus(tmp_path)
 
 

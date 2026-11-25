@@ -19,10 +19,11 @@ Rule = TypeVar("Rule", FaultCodeRule, SensorThresholdRule)
 
 
 def _read_rules(
-    path: Path, parse: Callable[[str], Sequence[object]], model: type[Rule]
+    root: Path, filename: str, parse: Callable[[str], Sequence[object]], model: type[Rule]
 ) -> list[Rule]:
+    path = root / filename
     try:
-        if path.is_symlink():
+        if path.is_symlink() or not path.resolve().is_relative_to(root):
             raise CorpusError("Rule tables must reside inside the corpus directory")
         if not path.exists():
             return []
@@ -68,11 +69,12 @@ class DiagnosticTools:
 
     @classmethod
     def from_corpus(cls, corpus_dir: Path) -> "DiagnosticTools":
+        root = corpus_dir.resolve()
+        if not root.is_dir():
+            raise CorpusError(f"Corpus directory does not exist: {root}")
         return cls(
-            _read_rules(corpus_dir / "fault_codes.csv", parse_csv_records, FaultCodeRule),
-            _read_rules(
-                corpus_dir / "sensor_thresholds.json", parse_json_records, SensorThresholdRule
-            ),
+            _read_rules(root, "fault_codes.csv", parse_csv_records, FaultCodeRule),
+            _read_rules(root, "sensor_thresholds.json", parse_json_records, SensorThresholdRule),
         )
 
     def equipment_for(self, request: DiagnosticRequest) -> str | None:

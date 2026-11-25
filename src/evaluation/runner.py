@@ -12,7 +12,7 @@ from src.agents.tools import RULE_TABLES, DiagnosticTools
 from src.agents.workflow import create_diagnostic_workflow
 from src.core.embedding import create_embedding_client
 from src.core.exceptions import ConfigurationError, CorpusError, ModelClientError
-from src.core.llm import BaseLLMClient, ChatMessage, create_llm_client
+from src.core.llm import BaseLLMClient, ChatMessage, create_llm_client, parse_model_json
 from src.core.logging import log_event
 from src.core.reranker import create_reranker
 from src.core.settings import Settings
@@ -57,10 +57,14 @@ class _RecordingRetriever:
         self.last = ()
 
     def search(self, query: str, top_k: int = 5, *, rerank: bool = True) -> list[SearchHit]:
-        hits = self._search(query, top_k)
-        self.last = tuple(hit.chunk for hit in hits)
-        if self.first is None:
-            self.first = self.last
+        is_first_attempt = self.first is None
+        self.last = ()
+        try:
+            hits = self._search(query, top_k)
+            self.last = tuple(hit.chunk for hit in hits)
+        finally:
+            if is_first_attempt:
+                self.first = self.last
         return hits
 
 
@@ -94,7 +98,7 @@ def judge_faithfulness(
         ]
     )
     try:
-        return _JudgeVerdict.model_validate_json(response.text).faithfulness
+        return parse_model_json(response.text, _JudgeVerdict).faithfulness
     except ValidationError:
         raise ModelClientError(
             "The evaluation judge returned an invalid faithfulness score"
@@ -102,7 +106,12 @@ def judge_faithfulness(
 
 
 def evaluate(
-    settings: Settings, dataset: EvalDataset, *, top_k: int = 5, judge: bool = False
+    settings: Settings,
+    dataset: EvalDataset,
+    *,
+    top_k: int = 5,
+    judge: bool = False,
+    on_mode_complete: Callable[[ModeReport, float], None] | None = None,
 ) -> EvaluationReport:
     if top_k < 1:
         raise ValueError("top_k must be positive")
@@ -143,6 +152,7 @@ def evaluate(
         }
         reports = []
         for mode, retrieval in searches.items():
+            mode_started = perf_counter()
             capture = _RecordingRetriever(retrieval)
             workflow = create_diagnostic_workflow(
                 settings, capture, tools=tools, llm_client=llm, initial_top_k=top_k
@@ -153,11 +163,21 @@ def evaluate(
                 started = perf_counter()
                 answer = workflow.invoke(case.request, include_trace=False)
                 latency_ms = (perf_counter() - started) * 1000
-                faithfulness = (
-                    judge_faithfulness(llm, case.request.query, answer, capture.last)
-                    if judge
-                    else None
-                )
+                faithfulness = None
+                if judge:
+                    try:
+                        faithfulness = judge_faithfulness(
+                            llm, case.request.query, answer, capture.last
+                        )
+                    except ModelClientError as exc:
+                        log_event(
+                            _LOGGER,
+                            "evaluation.judge_failed",
+                            level=logging.WARNING,
+                            mode=mode,
+                            case_id=case.id,
+                            status_code=exc.status_code,
+                        )
                 results.append(
                     score_case(
                         case,
@@ -169,8 +189,18 @@ def evaluate(
                         faithfulness=faithfulness,
                     )
                 )
-            reports.append(ModeReport(mode=mode, metrics=summarize(results), cases=tuple(results)))
-            log_event(_LOGGER, "evaluation.mode_complete", mode=mode, samples=len(results))
+            mode_report = ModeReport(mode=mode, metrics=summarize(results), cases=tuple(results))
+            reports.append(mode_report)
+            elapsed = perf_counter() - mode_started
+            log_event(
+                _LOGGER,
+                "evaluation.mode_complete",
+                mode=mode,
+                samples=len(results),
+                elapsed_seconds=elapsed,
+            )
+            if on_mode_complete is not None:
+                on_mode_complete(mode_report, elapsed)
 
     providers = {
         "llm": f"{settings.llm.provider}:{settings.llm.model}",

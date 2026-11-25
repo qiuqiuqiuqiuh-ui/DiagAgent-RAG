@@ -13,7 +13,7 @@ from src.agents.schemas import (
     Intent,
     ToolFinding,
 )
-from src.evaluation.dataset import Category, EvalCase
+from src.evaluation.dataset import Category, EvalCase, ExpectedTool
 from src.ingestion.schemas import Chunk
 
 
@@ -87,6 +87,23 @@ def _tool_record(finding: ToolFinding) -> tuple[str, str, str, str | None]:
     return finding.kind, label.casefold(), finding.status, asset
 
 
+def _tools_match(expected: Sequence[ExpectedTool], actual: Sequence[ToolFinding]) -> bool:
+    if len(expected) != len(actual):
+        return False
+    unmatched = [_tool_record(finding) for finding in actual]
+    # Match asset-specific labels before labels that accept any equipment.
+    for label in sorted(expected, key=lambda item: item.equipment_id is None):
+        key = (label.kind, label.target.casefold(), label.status)
+        asset = label.equipment_id.casefold() if label.equipment_id else None
+        for index, finding in enumerate(unmatched):
+            if finding[:3] == key and (asset is None or finding[3] == asset):
+                unmatched.pop(index)
+                break
+        else:
+            return False
+    return True
+
+
 def score_case(
     case: EvalCase,
     result: DiagnosticResult,
@@ -106,18 +123,6 @@ def score_case(
             citation_valid = validate_citations(result.answer, final_chunks) == result.citations
         except CitationError:
             citation_valid = False
-    findings = [_tool_record(finding) for finding in result.tool_findings]
-    tools_correct = None
-    if case.expected_tools:
-        tools_correct = all(
-            any(
-                (kind, label, status)
-                == (expected.kind, expected.target.casefold(), expected.status)
-                and (expected.equipment_id is None or asset == expected.equipment_id.casefold())
-                for kind, label, status, asset in findings
-            )
-            for expected in case.expected_tools
-        )
     return CaseResult(
         id=case.id,
         category=case.category,
@@ -132,7 +137,9 @@ def score_case(
         else None,
         citation_valid=citation_valid,
         routing_correct=result.intent == case.expected_intent,
-        tools_correct=tools_correct,
+        tools_correct=_tools_match(case.expected_tools, result.tool_findings)
+        if case.expected_tools
+        else None,
         abstention_correct=(result.status == "answered") == (case.expected_status == "answered"),
         latency_ms=latency_ms,
         faithfulness=faithfulness,

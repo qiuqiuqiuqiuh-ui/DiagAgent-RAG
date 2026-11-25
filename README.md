@@ -174,7 +174,8 @@ at least 0.95 within that scope. `bypass_cache` skips both lookup and write.
 The API emits traces for fresh responses when `include_trace` is enabled
 and sets `cache_hit` when reusing an answer. Keep the cache file on the
 local filesystem. Rebuild the index through the running service to publish
-a new snapshot for subsequent requests.
+a new snapshot for subsequent requests and remove cache rows for older index
+versions. The Colab profile keeps its SQLite file under `/content/diagagent-cache/`.
 
 ## Evaluation and Colab
 
@@ -192,7 +193,10 @@ timestamped JSON and Markdown under the configured reports directory.
 Reports identify the dataset hash, index and model profile. They include
 Recall@K, MRR@K, NDCG@K, citation and tool metrics, routing and abstention
 accuracy, and P50/P95 workflow latency. Add `--judge` to a live run for
-optional faithfulness scoring with the configured LLM.
+optional faithfulness scoring with the configured LLM. The CLI prints progress
+as each mode completes. A failed judge call leaves that case's faithfulness
+unscored. Reports retain the case and count valid judge scores in
+`judge_samples`.
 
 Open [colab_gpu_pipeline.ipynb](notebooks/colab_gpu_pipeline.ipynb) in Colab
 with a GPU runtime. The notebook mounts Drive, uses the repository at

@@ -51,6 +51,7 @@ class DiagnosticService:
         self._profile_hash = profile_hash(settings)
         self._snapshot: _Snapshot | None = None
         self._ingest_lock = Lock()
+        self._cache_write_lock = Lock()
 
     def _load_snapshot(self, *, rebuild: bool) -> _Snapshot:
         settings = self._settings
@@ -95,7 +96,17 @@ class DiagnosticService:
     def ingest(self) -> IndexManifest:
         with self._ingest_lock:
             snapshot = self._load_snapshot(rebuild=True)
-            self._snapshot = snapshot
+            with self._cache_write_lock:
+                self._snapshot = snapshot
+                try:
+                    self._cache.prune_other_versions(snapshot.manifest.index_version)
+                except sqlite3.Error as exc:
+                    log_event(
+                        _LOGGER,
+                        "cache.prune_failed",
+                        level=logging.WARNING,
+                        reason=type(exc).__name__,
+                    )
             return snapshot.manifest
 
     def diagnose(self, request: DiagnoseRequest) -> DiagnoseResponse:
@@ -125,7 +136,14 @@ class DiagnosticService:
             result = snapshot.workflow.invoke(diagnosis, include_trace=request.include_trace)
             if scope is not None and embedding is not None:
                 try:
-                    self._cache.store(scope, diagnosis.query, embedding, result)
+                    with self._cache_write_lock:
+                        active = self._snapshot
+                        # A diagnosis that used the previous snapshot may finish after a rebuild.
+                        if (
+                            active is not None
+                            and active.manifest.index_version == scope.index_version
+                        ):
+                            self._cache.store(scope, diagnosis.query, embedding, result)
                 except sqlite3.Error as exc:
                     log_event(
                         _LOGGER,

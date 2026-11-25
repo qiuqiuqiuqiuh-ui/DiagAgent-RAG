@@ -49,7 +49,8 @@ def context_hash(request: DiagnosticRequest, tools: DiagnosticTools) -> str:
         (key.casefold(), value) for key, value in request.sensor_readings.items()
     ):
         rule = sensor_rules.get(label)
-        readings.append((label, float(value).hex(), rule.unit.casefold() if rule else None))
+        normalized = 0.0 if value == 0 else float(value)
+        readings.append((label, normalized.hex(), rule.unit.casefold() if rule else None))
     # Numbers, codes, units, and polarity words constrain reuse even inside unstructured queries.
     details = [
         term
@@ -107,6 +108,8 @@ class SQLiteSemanticCache:
         return sqlite3.connect(self._path, timeout=5)
 
     def lookup(self, scope: CacheScope, embedding: NDArray[np.float32]) -> DiagnosticResult | None:
+        if embedding.ndim != 1:
+            raise ValueError("Expected a 1D embedding vector")
         query = embedding.astype(np.float64)
         query_norm = np.linalg.norm(query)
         if not query_norm or not np.isfinite(query_norm):
@@ -149,6 +152,8 @@ class SQLiteSemanticCache:
         embedding: NDArray[np.float32],
         result: DiagnosticResult,
     ) -> None:
+        if embedding.ndim != 1:
+            raise ValueError("Expected a 1D embedding vector")
         if result.status != "answered" or not result.citations or not embedding.any():
             return
         query_hash = _digest(" ".join(query.casefold().split()))
@@ -163,4 +168,10 @@ class SQLiteSemanticCache:
                 DO UPDATE SET vector=excluded.vector, result=excluded.result
                 """,
                 (*scope.as_params(), query_hash, embedding.astype("<f4").tobytes(), payload),
+            )
+
+    def prune_other_versions(self, active_index_version: str) -> None:
+        with closing(self._connect()) as connection, connection:
+            connection.execute(
+                "DELETE FROM semantic_cache WHERE index_version <> ?", (active_index_version,)
             )

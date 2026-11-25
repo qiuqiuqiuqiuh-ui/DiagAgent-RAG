@@ -1,8 +1,9 @@
 import logging
+import re
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
 from time import perf_counter
-from typing import Literal
+from typing import Literal, TypeVar
 
 import httpx
 from pydantic import BaseModel, Field, field_validator
@@ -14,6 +15,15 @@ from src.core.openai_compatible import OpenAICompatibleTransport
 from src.core.settings import LLMSettings
 
 _LOGGER = logging.getLogger("diagagent.core.llm")
+_JSON_FENCE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
+ModelJSON = TypeVar("ModelJSON", bound=BaseModel)
+
+
+def parse_model_json(text: str, schema: type[ModelJSON]) -> ModelJSON:
+    """Validate a model's JSON response, including an optional Markdown fence."""
+    payload = text.strip()
+    fence = _JSON_FENCE.fullmatch(payload)
+    return schema.model_validate_json(fence[1] if fence else payload)
 
 
 class ChatMessage(BaseModel):

@@ -5,6 +5,7 @@ paths:
   corpus_dir: /content/drive/MyDrive/DiagAgent-RAG/data/raw
   index_dir: /content/drive/MyDrive/DiagAgent-RAG/data/index
   reports_dir: /content/drive/MyDrive/DiagAgent-RAG/reports/generated
+  cache_file: /content/diagagent-cache/semantic.sqlite3
 ingestion:
   chunk_size: 1000
   chunk_overlap: 150

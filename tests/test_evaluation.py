@@ -1,21 +1,32 @@
 import ast
 import json
+from collections.abc import Sequence
+from dataclasses import replace
 from math import log2
 from pathlib import Path
 
 import pytest
 
 from src.agents.citations import validate_citations
-from src.agents.schemas import DiagnosticResult
+from src.agents.schemas import DiagnosticResult, FaultCodeFinding
 from src.agents.tools import DiagnosticTools
-from src.core.exceptions import CorpusError
-from src.core.llm import MockLLMClient
+from src.core.embedding import create_embedding_client
+from src.core.exceptions import CorpusError, ModelClientError
+from src.core.llm import ChatMessage, MockLLMClient
 from src.core.settings import load_settings
 from src.evaluation.dataset import EvalCase, load_dataset
 from src.evaluation.metrics import score_case, score_ranking, summarize
-from src.evaluation.runner import judge_faithfulness
+from src.evaluation.report import write_reports
+from src.evaluation.runner import (
+    EvaluationReport,
+    _RecordingRetriever,
+    evaluate,
+    judge_faithfulness,
+)
 from src.ingestion.corpus import read_corpus
+from src.ingestion.pipeline import build_index
 from src.ingestion.schemas import Chunk
+from src.retrieval.schemas import SearchHit
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -105,7 +116,7 @@ def test_case_citations_metric_aggregation_and_optional_judge() -> None:
         answer=answer,
         citations=validate_citations(answer, [chunk]),
     )
-    judge = MockLLMClient(responder=lambda messages: '{"faithfulness":0.75}')
+    judge = MockLLMClient(responder=lambda messages: '```json\n{"faithfulness":0.75}\n```')
     faithfulness = judge_faithfulness(judge, case.request.query, result, [chunk])
     assert faithfulness == 0.75
     supported = score_case(
@@ -117,6 +128,105 @@ def test_case_citations_metric_aggregation_and_optional_judge() -> None:
     assert report.citation_coverage == report.citation_validity == 0.5
     assert report.latency_p50_ms == 5 and report.latency_p95_ms == pytest.approx(7.7)
     assert report.faithfulness == 0.75 and report.judge_samples == 1
+
+
+def test_scoring_rejects_extra_and_reused_findings() -> None:
+    dataset = load_dataset(ROOT / "data" / "eval" / "golden_smoke.jsonl")
+    case = dataset.cases[0]
+    tools = DiagnosticTools.from_corpus(ROOT / "data" / "raw")
+    findings = tools.evaluate(case.request)
+    extra = FaultCodeFinding(fault_code="BOGUS-999", status="unknown")
+    result = DiagnosticResult(
+        status="answered", intent="fault_diagnosis", answer="fixture", tool_findings=findings
+    )
+    assert score_case(case, result, (), (), k=5, latency_ms=1).tools_correct is True
+
+    extra_result = result.model_copy(update={"tool_findings": (*findings, extra)})
+    assert score_case(case, extra_result, (), (), k=5, latency_ms=1).tools_correct is False
+    duplicate_labels = case.model_copy(update={"expected_tools": case.expected_tools * 2})
+    assert (
+        score_case(duplicate_labels, extra_result, (), (), k=5, latency_ms=1).tools_correct is False
+    )
+
+
+def test_recording_retriever_clears_evidence_on_failed_attempt() -> None:
+    settings = load_settings(project_root=ROOT, env_file=None)
+    chunk = read_corpus(settings.paths.corpus_dir, settings.ingestion).chunks[0]
+
+    def search(query: str, k: int) -> list[SearchHit]:
+        if query == "fail":
+            raise ModelClientError("retrieval failed")
+        return [SearchHit(chunk=chunk, score=1.0)]
+
+    capture = _RecordingRetriever(search)
+    capture.search("ok")
+    assert capture.first == capture.last == (chunk,)
+    with pytest.raises(ModelClientError):
+        capture.search("fail")
+    assert capture.first == (chunk,)
+    assert capture.last == ()
+
+    capture.reset()
+    with pytest.raises(ModelClientError):
+        capture.search("fail")
+    capture.search("ok")
+    assert capture.first == ()
+    assert capture.last == (chunk,)
+
+
+def test_evaluation_preserves_full_report_when_one_judge_call_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    settings = load_settings(project_root=ROOT, env_file=None)
+    settings.paths.index_dir = tmp_path / "index"
+    with create_embedding_client(settings.embedding) as embedder:
+        build_index(settings, embedder)
+    settings.llm.provider = "openai_compatible"
+    dataset = load_dataset(ROOT / "data" / "eval" / "golden_smoke.jsonl")
+    dataset = replace(dataset, cases=dataset.cases[:2])
+    judge_calls = 0
+
+    def respond(messages: Sequence[ChatMessage]) -> str:
+        nonlocal judge_calls
+        prompt = messages[0].content
+        if '"faithfulness"' in prompt:
+            judge_calls += 1
+            if judge_calls == 1:
+                raise ModelClientError("provider limited the judge", status_code=429)
+            return '```json\n{"faithfulness":0.9}\n```'
+        if "Classify the request" in prompt:
+            return '{"intent":"fault_diagnosis"}'
+        if "Draft a concise" in prompt:
+            chunk_id = json.loads(messages[-1].content)["chunks"][0]["chunk_id"]
+            return json.dumps({"answer": f"Follow the cited procedure [{chunk_id}]."})
+        return '{"sufficient":true,"missing_aspects":[],"refined_query":null}'
+
+    class ScriptedLiveClient(MockLLMClient):
+        provider = "openai_compatible"
+
+    client = ScriptedLiveClient(model=settings.llm.model, responder=respond)
+    monkeypatch.setattr("src.evaluation.runner.create_llm_client", lambda config: client)
+    progress: list[tuple[str, int, float]] = []
+    report = evaluate(
+        settings,
+        dataset,
+        judge=True,
+        on_mode_complete=lambda mode, elapsed: progress.append(
+            (mode.mode, mode.metrics.samples, elapsed)
+        ),
+    )
+    json_path, markdown_path = write_reports(report, tmp_path / "reports")
+    reloaded = EvaluationReport.model_validate_json(json_path.read_bytes())
+    assert markdown_path.is_file()
+    assert len(reloaded.modes) == 4 and all(len(mode.cases) == 2 for mode in reloaded.modes)
+    assert judge_calls == 8
+    assert [mode.metrics.judge_samples for mode in reloaded.modes] == [1, 2, 2, 2]
+    assert reloaded.modes[0].cases[0].faithfulness is None
+    assert all(mode.metrics.faithfulness == pytest.approx(0.9) for mode in reloaded.modes)
+    assert [mode for mode, _, _ in progress] == [mode.mode for mode in reloaded.modes]
+    assert all(count == 2 and elapsed >= 0.0 for _, count, elapsed in progress)
+    failures = [record for record in caplog.records if record.message == "evaluation.judge_failed"]
+    assert len(failures) == 1 and failures[0].event_fields["status_code"] == 429
 
 
 def test_colab_notebook_matches_script_and_has_clean_cells() -> None:

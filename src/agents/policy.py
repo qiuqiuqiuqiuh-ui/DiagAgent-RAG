@@ -14,7 +14,7 @@ from src.agents.schemas import (
     ToolFinding,
 )
 from src.core.exceptions import ModelClientError
-from src.core.llm import BaseLLMClient, ChatMessage
+from src.core.llm import BaseLLMClient, ChatMessage, parse_model_json
 from src.core.settings import DomainSettings
 from src.core.tokenizer import tokenize_codes
 from src.ingestion.schemas import Chunk
@@ -47,7 +47,6 @@ _ALIASES = {
     "thresholds": "threshold",
 }
 _BRACKETS = str.maketrans("[]", "()")
-_JSON_FENCE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
 Response = TypeVar("Response", bound=BaseModel)
 
 
@@ -190,10 +189,8 @@ class LLMDiagnosticPolicy:
         result = self._client.generate(
             [ChatMessage(role="system", content=system), ChatMessage(role="user", content=payload)]
         )
-        text = result.text.strip()
-        fence = _JSON_FENCE.fullmatch(text)
         try:
-            return schema.model_validate_json(fence[1] if fence else text)
+            return parse_model_json(result.text, schema)
         except ValidationError:
             raise ModelClientError(f"Invalid {schema.__name__} from the diagnostic model") from None
 

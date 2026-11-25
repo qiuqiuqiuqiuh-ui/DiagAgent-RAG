@@ -8,7 +8,12 @@ from starlette.concurrency import run_in_threadpool
 from src.api.schemas import DiagnoseRequest, DiagnoseResponse, HealthResponse
 from src.api.service import DiagnosticService, IndexNotReady
 from src.core.embedding import create_embedding_client
-from src.core.exceptions import CorpusError, IndexValidationError, ModelClientError
+from src.core.exceptions import (
+    ConfigurationError,
+    CorpusError,
+    IndexValidationError,
+    ModelClientError,
+)
 from src.core.llm import create_llm_client
 from src.core.reranker import create_reranker
 from src.core.settings import Settings, load_settings
@@ -53,6 +58,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ) from exc
         except IndexValidationError as exc:
             raise HTTPException(503, "The index could not be published or loaded.") from exc
+        except ConfigurationError as exc:
+            raise HTTPException(503, "The configured model provider is unavailable.") from exc
         except ModelClientError as exc:
             raise HTTPException(502, "The embedding provider could not build the index.") from exc
 
@@ -62,5 +69,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return service.diagnose(request)
         except IndexNotReady as exc:
             raise HTTPException(503, str(exc)) from exc
+        except ConfigurationError as exc:
+            raise HTTPException(503, "The configured model provider is unavailable.") from exc
 
     return app

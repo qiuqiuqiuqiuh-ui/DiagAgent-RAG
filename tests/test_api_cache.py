@@ -1,5 +1,10 @@
+import sqlite3
+import sys
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 from shutil import copytree
+from threading import Event
 
 import numpy as np
 import pytest
@@ -7,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from src.agents.schemas import Citation, DiagnosticRequest, DiagnosticResult
 from src.agents.tools import DiagnosticTools
+from src.agents.workflow import DiagnosticWorkflow
 from src.api.app import create_app
 from src.api.cache import CacheScope, SQLiteSemanticCache, context_hash, profile_hash
 from src.core.settings import Settings, load_settings
@@ -45,6 +51,10 @@ def test_semantic_cache_reuses_similar_vectors_and_isolates_scope(tmp_path: Path
     assert cache.lookup(CacheScope("index-b", "profile-a", "context-a"), vector) is None
     assert cache.lookup(CacheScope("index-a", "profile-b", "context-a"), vector) is None
     assert cache.lookup(CacheScope("index-a", "profile-a", "context-b"), vector) is None
+    with pytest.raises(ValueError, match="Expected a 1D embedding vector"):
+        cache.lookup(scope, vector[None, :])
+    with pytest.raises(ValueError, match="Expected a 1D embedding vector"):
+        cache.store(scope, "matrix", vector[None, :], result)
 
 
 def test_context_hash_keeps_precision_and_entities(api_settings: Settings) -> None:
@@ -61,6 +71,11 @@ def test_context_hash_keeps_precision_and_entities(api_settings: Settings) -> No
     )
     value = context_hash(reference, tools)
     assert value == context_hash(normalized, tools)
+    assert context_hash(
+        normalized.model_copy(update={"sensor_readings": {"winding_temp": 0.0}}), tools
+    ) == context_hash(
+        normalized.model_copy(update={"sensor_readings": {"winding_temp": -0.0}}), tools
+    )
     assert value != context_hash(
         normalized.model_copy(update={"sensor_readings": {"winding_temp": 119.000001}}), tools
     )
@@ -117,6 +132,21 @@ def test_api_ingestion_cold_cached_and_validation(api_settings: Settings) -> Non
         assert restarted.post("/v1/diagnose", json=query).json()["cache_hit"]
 
 
+@pytest.mark.parametrize("provider", ["embedding", "reranker"])
+def test_missing_optional_model_provider_returns_503(
+    api_settings: Settings, monkeypatch: pytest.MonkeyPatch, provider: str
+) -> None:
+    monkeypatch.setitem(sys.modules, "sentence_transformers", None)
+    getattr(api_settings, provider).provider = "sentence_transformers"
+    with TestClient(create_app(api_settings)) as client:
+        response = client.post("/v1/ingest")
+        if provider == "reranker":
+            response.raise_for_status()
+            response = client.post("/v1/diagnose", json={"query": "What does VFD-OC3 mean?"})
+        assert response.status_code == 503
+        assert response.json() == {"detail": "The configured model provider is unavailable."}
+
+
 def test_api_cache_isolation_between_assets_readings_and_abstentions(
     api_settings: Settings,
 ) -> None:
@@ -147,7 +177,7 @@ def test_api_cache_isolation_between_assets_readings_and_abstentions(
 
 
 def test_reingest_preserves_active_snapshot_on_invalid_rules_and_rotates_cache(
-    api_settings: Settings, tmp_path: Path
+    api_settings: Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     api_settings.paths.corpus_dir = copytree(api_settings.paths.corpus_dir, tmp_path / "corpus")
     query = {"query": "What does VFD-OC3 mean?", "equipment_id": "DRV-300"}
@@ -164,9 +194,40 @@ def test_reingest_preserves_active_snapshot_on_invalid_rules_and_rotates_cache(
         assert client.get("/health").json()["index_version"] == old_version
         assert client.post("/v1/diagnose", json=query).json()["cache_hit"]
         thresholds.write_text(original, encoding="utf-8")
-        manual = api_settings.paths.corpus_dir / "manuals" / "vfd_faults.md"
-        with manual.open("a", encoding="utf-8") as stream:
-            stream.write("\n\nRecord a follow-up after the maintenance action.\n")
-        new_version = client.post("/v1/ingest").json()["index_version"]
+        with closing(sqlite3.connect(api_settings.paths.cache_file)) as connection:
+            assert connection.execute("SELECT index_version FROM semantic_cache").fetchall() == [
+                (old_version,)
+            ]
+
+        ready = Event()
+        release = Event()
+        delayed_query = "What does E01.2 mean?"
+        invoke = DiagnosticWorkflow.invoke
+
+        def delay_answer(
+            workflow: DiagnosticWorkflow, request: DiagnosticRequest, *, include_trace: bool = True
+        ) -> DiagnosticResult:
+            result = invoke(workflow, request, include_trace=include_trace)
+            if request.query == delayed_query:
+                ready.set()
+                assert release.wait(10), "The rebuild did not finish in time"
+            return result
+
+        monkeypatch.setattr(DiagnosticWorkflow, "invoke", delay_answer)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            pending = executor.submit(client.post, "/v1/diagnose", json={"query": delayed_query})
+            try:
+                assert ready.wait(10), "The old-snapshot diagnosis did not reach the cache write"
+                manual = api_settings.paths.corpus_dir / "manuals" / "vfd_faults.md"
+                with manual.open("a", encoding="utf-8") as stream:
+                    stream.write("\n\nRecord a follow-up after the maintenance action.\n")
+                new_version = client.post("/v1/ingest").raise_for_status().json()["index_version"]
+            finally:
+                release.set()
+            assert pending.result(timeout=10).raise_for_status().json()["status"] == "answered"
+
         assert new_version != old_version
+        with closing(sqlite3.connect(api_settings.paths.cache_file)) as connection:
+            assert connection.execute("SELECT index_version FROM semantic_cache").fetchall() == []
         assert not client.post("/v1/diagnose", json=query).json()["cache_hit"]
+        assert client.post("/v1/diagnose", json=query).json()["cache_hit"]

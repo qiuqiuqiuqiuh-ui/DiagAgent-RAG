@@ -8,7 +8,11 @@ from src.core.logging import configure_logging
 from src.core.settings import load_settings
 from src.evaluation.dataset import load_dataset
 from src.evaluation.report import write_reports
-from src.evaluation.runner import evaluate
+from src.evaluation.runner import ModeReport, evaluate
+
+
+def _print_progress(report: ModeReport, elapsed: float) -> None:
+    print(f"{report.mode}: {report.metrics.samples} cases in {elapsed:.1f}s", flush=True)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -29,7 +33,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         settings = load_settings(args.config, project_root=root)
         configure_logging(settings.log_level)
         dataset = load_dataset(root / args.dataset)
-        report = evaluate(settings, dataset, top_k=args.top_k, judge=args.judge)
+        print(f"Evaluating {dataset.name}: {len(dataset.cases)} cases per mode", flush=True)
+        report = evaluate(
+            settings, dataset, top_k=args.top_k, judge=args.judge, on_mode_complete=_print_progress
+        )
         json_path, markdown_path = write_reports(report, settings.paths.reports_dir)
     except (DiagAgentError, OSError) as exc:
         print(f"Evaluation failed: {exc}", file=sys.stderr)

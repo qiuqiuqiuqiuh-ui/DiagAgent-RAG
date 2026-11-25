@@ -23,6 +23,7 @@ def test_default_and_colab_profiles() -> None:
     assert colab.paths.index_dir.as_posix().endswith(
         "/content/drive/MyDrive/DiagAgent-RAG/data/index"
     )
+    assert colab.paths.cache_file.as_posix().endswith("/content/diagagent-cache/semantic.sqlite3")
     assert colab.llm.provider == "openai_compatible"
     assert colab.llm.api_key is None
     assert colab.embedding.dimension == 384

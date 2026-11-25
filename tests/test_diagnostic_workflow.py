@@ -1,0 +1,263 @@
+import json
+import logging
+import socket
+from collections.abc import Iterator, Sequence
+from pathlib import Path
+
+import pytest
+
+from src.agents.citations import CitationError, validate_citations
+from src.agents.policy import LLMDiagnosticPolicy
+from src.agents.schemas import DiagnosticRequest, DiagnosticResult, FaultCodeFinding, SensorFinding
+from src.agents.tools import DiagnosticTools
+from src.agents.workflow import DiagnosticWorkflow, create_diagnostic_workflow
+from src.core.embedding import create_embedding_client
+from src.core.llm import ChatMessage, MockLLMClient
+from src.core.reranker import create_reranker
+from src.core.settings import DomainSettings, IngestionSettings, Settings, load_settings
+from src.ingestion.chunking import chunk_sections
+from src.ingestion.pipeline import build_index
+from src.ingestion.schemas import Chunk, Section
+from src.retrieval.hybrid import HybridRetriever
+from src.retrieval.index import load_index
+from src.retrieval.schemas import SearchHit
+
+ROOT = Path(__file__).resolve().parents[1]
+NODES = ("intent_router", "retriever", "diagnostic_tool", "synthesizer", "critic")
+DOMAIN = DomainSettings(name="Industrial Equipment Fault Diagnosis", language="en")
+
+
+@pytest.fixture
+def live_index(tmp_path: Path) -> Iterator[tuple[Settings, HybridRetriever]]:
+    settings = load_settings(project_root=ROOT, env_file=None)
+    settings.paths.index_dir = tmp_path / "index"
+    with create_embedding_client(settings.embedding) as embedder:
+        build_index(settings, embedder)
+        stored = load_index(settings.paths.index_dir, settings.embedding, settings.ingestion)
+        yield (
+            settings,
+            HybridRetriever(
+                stored, embedder, create_reranker(settings.reranker), settings=settings.retrieval
+            ),
+        )
+
+
+def test_mock_workflow_answers_and_traces_all_nodes_without_network(
+    live_index: tuple[Settings, HybridRetriever],
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def no_network(*args: object, **kwargs: object) -> None:
+        raise AssertionError("The offline workflow tried to connect to the network")
+
+    monkeypatch.setattr(socket.socket, "connect", no_network)
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "mock-cannot-use-network")
+    caplog.set_level(logging.INFO, logger="diagagent.agents")
+    settings, retriever = live_index
+    result = create_diagnostic_workflow(settings, retriever).invoke(
+        DiagnosticRequest(
+            query="What does VFD-OC3 mean and what should I check?", equipment_id="DRV-300"
+        )
+    )
+    assert result.status == "answered"
+    assert result.intent == "fault_diagnosis"
+    assert "overcurrent" in result.answer.casefold()
+    assert result.citations and all(
+        f"[{item.chunk_id}]" in result.answer for item in result.citations
+    )
+    assert "data/raw" not in result.citations[0].source_path
+    assert isinstance(result.tool_findings[0], FaultCodeFinding)
+    assert result.tool_findings[0].status == "found"
+    assert result.trace is not None and result.trace.retry_count == 0
+    assert tuple(step.node for step in result.trace.nodes) == NODES
+    assert all(step.latency_ms >= 0 for step in result.trace.nodes)
+    assert [(edge.from_node, edge.to_node) for edge in result.trace.transitions] == list(
+        zip(("START", *NODES), (*NODES, "END"), strict=True)
+    )
+    logged = [
+        record.event_fields for record in caplog.records if record.message == "agent.transition"
+    ]
+    assert [fields["to_node"] for fields in logged] == [*NODES, "END"]
+
+
+def test_parameter_lookup_returns_asset_specific_sensor_finding(
+    live_index: tuple[Settings, HybridRetriever],
+) -> None:
+    settings, retriever = live_index
+    result = create_diagnostic_workflow(settings, retriever).invoke(
+        DiagnosticRequest(
+            query="What is the winding_temp warning threshold?",
+            equipment_id="MX-200",
+            sensor_readings={"winding_temp": 118},
+        ),
+        include_trace=False,
+    )
+    assert result.status == "answered"
+    assert result.intent == "parameter_lookup"
+    assert result.trace is None
+    assert "105" in result.answer
+    assert result.citations[0].section_title == "sensor_thresholds > MX-200 winding_temp"
+    (finding,) = result.tool_findings
+    assert isinstance(finding, SensorFinding) and finding.status == "warning"
+
+
+def test_mock_abstains_after_two_retries_for_undocumented_specification(
+    live_index: tuple[Settings, HybridRetriever],
+) -> None:
+    settings, retriever = live_index
+    workflow = create_diagnostic_workflow(settings, retriever, initial_top_k=2)
+    result = workflow.invoke(
+        DiagnosticRequest(query="What is the mounting bolt torque for the MX-200 motor?")
+    )
+    assert result.status == "insufficient_evidence"
+    assert result.intent == "parameter_lookup"
+    assert any("torque" in item for item in result.missing_aspects)
+    assert result.escalation_recommendation
+    assert result.citations == ()
+    assert result.trace is not None and result.trace.retry_count == 2
+    assert [step.top_k for step in result.trace.nodes if step.node == "retriever"] == [2, 4, 6]
+    assert len(result.trace.nodes) == 13
+
+
+def test_ambiguous_sensor_reading_requires_equipment_identification(
+    live_index: tuple[Settings, HybridRetriever],
+) -> None:
+    settings, retriever = live_index
+    result = create_diagnostic_workflow(settings, retriever).invoke(
+        DiagnosticRequest(
+            query="Check the winding_temp threshold", sensor_readings={"winding_temp": 118}
+        )
+    )
+    assert result.status == "insufficient_evidence"
+    assert any(
+        "documented threshold for sensor winding_temp" in item for item in result.missing_aspects
+    )
+    assert result.tool_findings[0].status == "ambiguous"
+
+
+class RecordingRetriever:
+    def __init__(self, chunks: Sequence[Chunk] = ()) -> None:
+        self.hits = [SearchHit(chunk=chunk, score=1) for chunk in chunks]
+        self.calls: list[tuple[str, int, bool]] = []
+
+    def search(self, query: str, top_k: int = 5, *, rerank: bool = True) -> list[SearchHit]:
+        self.calls.append((query, top_k, rerank))
+        return self.hits[:top_k]
+
+
+def test_mock_parameter_lookup_cannot_use_another_assets_threshold() -> None:
+    settings = load_settings(project_root=ROOT, env_file=None)
+    chunks = chunk_sections(
+        "manual.md",
+        [
+            Section(title="MX-200", text="The winding_temp measures the motor temperature."),
+            Section(
+                title="PM-14", text="winding_temp warning_threshold: 100, critical_threshold: 115."
+            ),
+        ],
+        IngestionSettings(chunk_size=150, chunk_overlap=0),
+    )
+    result = create_diagnostic_workflow(settings, RecordingRetriever(chunks)).invoke(
+        DiagnosticRequest(query="What is the winding_temp warning threshold for MX-200?")
+    )
+    assert result.status == "insufficient_evidence"
+    assert result.citations == ()
+    assert any("threshold" in missing for missing in result.missing_aspects)
+
+
+@pytest.fixture
+def chunk() -> Chunk:
+    return Chunk(
+        chunk_id="vfd.pdf#s0#c0",
+        doc_id="vfd.pdf",
+        source_path="vfd.pdf",
+        section_title="Acceleration Overcurrent",
+        page_number=2,
+        section_index=0,
+        chunk_index=0,
+        text="VFD-OC3 indicates an acceleration overcurrent trip. Review the ramp time.",
+    )
+
+
+def test_out_of_scope_short_circuits_before_retrieval() -> None:
+    settings = load_settings(project_root=ROOT, env_file=None)
+    retriever = RecordingRetriever()
+    result = create_diagnostic_workflow(settings, retriever).invoke(
+        DiagnosticRequest(query="Give me the weather forecast for Tokyo.")
+    )
+    assert result.status == result.intent == "out_of_scope"
+    assert retriever.calls == []
+    assert result.tool_findings == result.citations == ()
+    assert result.trace is not None and result.trace.retry_count == 0
+    assert [step.node for step in result.trace.nodes] == ["intent_router"]
+
+
+def test_critic_refines_query_and_expands_retrieval_before_accepting(chunk: Chunk) -> None:
+    draft = {"answer": f"VFD-OC3 is an acceleration overcurrent trip. [{chunk.chunk_id}]"}
+    model_outputs = [
+        {"intent": "fault_diagnosis"},
+        draft,
+        {"sufficient": False, "missing_aspects": ["ramp"], "refined_query": "VFD-OC3 ramp current"},
+        draft,
+        {"sufficient": True, "missing_aspects": []},
+    ]
+    remaining = iter(model_outputs)
+    prompts: list[list[ChatMessage]] = []
+
+    def respond(messages: Sequence[ChatMessage]) -> str:
+        prompts.append(list(messages))
+        return json.dumps(next(remaining))
+
+    retriever = RecordingRetriever([chunk])
+    workflow = DiagnosticWorkflow(
+        retriever,
+        DiagnosticTools(),
+        LLMDiagnosticPolicy(MockLLMClient(responder=respond), DOMAIN),
+        initial_top_k=3,
+    )
+    result = workflow.invoke(DiagnosticRequest(query="Diagnose VFD-OC3"))
+    assert result.status == "answered" and result.citations[0].page_number == 2
+    assert result.trace is not None and result.trace.retry_count == 1
+    assert retriever.calls == [("Diagnose VFD-OC3", 3, True), ("VFD-OC3 ramp current", 6, True)]
+    assert tuple(step.node for step in result.trace.nodes) == (*NODES, *NODES[1:])
+    assert len(prompts) == 5
+    assert json.loads(prompts[-1][-1].content)["citations"][0]["chunk_id"] == chunk.chunk_id
+
+
+def test_untrusted_citations_are_rejected_even_with_valid_citations_present(chunk: Chunk) -> None:
+    (citation,) = validate_citations(f"Review ramp [{chunk.chunk_id}] [{chunk.chunk_id}].", [chunk])
+    assert citation.source_path == "vfd.pdf" and citation.page_number == 2
+    with pytest.raises(CitationError, match="retrieved"):
+        validate_citations(f"Review ramp [{chunk.chunk_id}] [invented#s0#c0].", [chunk])
+    with pytest.raises(CitationError):
+        validate_citations(f"Review ramp [{chunk.chunk_id}] [malformed", [chunk])
+    with pytest.raises(CitationError):
+        validate_citations("Review ramp without evidence.", [chunk])
+
+    def respond(messages: Sequence[ChatMessage]) -> str:
+        instruction = messages[0].content
+        if "Classify the request" in instruction:
+            return '{"intent":"fault_diagnosis"}'
+        assert "Draft a concise" in instruction
+        return json.dumps({"answer": f"Spurious claim [{chunk.chunk_id}] [invented#s0#c0]."})
+
+    retriever = RecordingRetriever([chunk])
+    result = DiagnosticWorkflow(
+        retriever, DiagnosticTools(), LLMDiagnosticPolicy(MockLLMClient(responder=respond), DOMAIN)
+    ).invoke(DiagnosticRequest(query="Diagnose VFD-OC3"))
+    assert result.status == "insufficient_evidence" and result.citations == ()
+    assert result.trace is not None and result.trace.retry_count == 2
+    assert "Spurious claim" not in result.answer
+    assert "retrieved" in result.missing_aspects[0]
+    assert len(retriever.calls) == 3
+
+
+def test_invalid_model_routing_fails_closed_without_retrieval() -> None:
+    retriever = RecordingRetriever()
+    result = DiagnosticWorkflow(
+        retriever, DiagnosticTools(), LLMDiagnosticPolicy(MockLLMClient(), DOMAIN)
+    ).invoke(DiagnosticRequest(query="Diagnose VFD-OC3"))
+    assert isinstance(result, DiagnosticResult)
+    assert result.status == "insufficient_evidence" and result.intent is None
+    assert retriever.calls == []

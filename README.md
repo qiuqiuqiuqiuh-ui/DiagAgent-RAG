@@ -1,9 +1,9 @@
 # DiagAgent-RAG
 
 Retrieval-augmented diagnostics for industrial equipment, using English maintenance
-manuals and structured fault and sensor data by default. The first two phases
-provide typed configuration, model clients, corpus indexing, hybrid retrieval,
-and offline CI.
+manuals and structured fault and sensor data by default. The implemented
+workflow indexes that corpus, retrieves evidence, and runs a typed diagnostic
+graph with offline Mock and OpenAI-compatible model policies.
 
 ## Target architecture
 
@@ -109,12 +109,46 @@ and `search.search(..., rerank=False)` for RRF without reranking. The reranker
 score scale is provider-specific. Search results retain the available
 component scores for evaluation.
 BM25 reports raw Okapi scores, which can be negative for terms that occur in
-most documents in a small corpus. These scores describe ranking and are not
-used as evidence thresholds.
+most documents in a small corpus. The critic checks evidence and citations
+independently of these ranking scores.
+
+## Run a diagnosis
+
+After building and loading the index as above, keep the embedding client
+open for the full duration of the diagnosis.
+
+```python
+from src.agents.schemas import DiagnosticRequest
+from src.agents.workflow import create_diagnostic_workflow
+
+with create_embedding_client(settings.embedding) as embedding:
+    search = HybridRetriever(
+        index, embedding, create_reranker(settings.reranker), settings=settings.retrieval
+    )
+    workflow = create_diagnostic_workflow(settings, search)
+    result = workflow.invoke(
+        DiagnosticRequest(query="What does VFD-OC3 mean?", equipment_id="DRV-300")
+    )
+    print(result.model_dump_json(indent=2))
+```
+
+The LangGraph path is intent router → retriever → diagnostic tool →
+synthesizer → critic. The router ends out-of-scope requests immediately.
+The critic can refine the query and expand retrieval up to twice. On
+exhaustion the workflow returns `insufficient_evidence` with a checklist and
+an escalation recommendation. Answered responses carry inline citations
+and structured source metadata. The default trace records transitions,
+latencies and retry counts. [LangGraph Graph API](https://docs.langchain.com/oss/python/langgraph/graph-api)
+
+The deterministic tools load `fault_codes.csv` and `sensor_thresholds.json`.
+Supply sensor readings in the unit recorded in the table. Threshold
+comparisons include equality, and readings shared across multiple equipment
+types need an unambiguous asset ID. Mock mode uses lexical routing and
+extractive evidence checks and keeps tracing local. To use an OpenAI-compatible profile, inject
+its open `llm_client` when creating the diagnostic workflow.
 
 ## Verification status
 
-Offline checks exercise configuration, deterministic model clients, parsers,
-chunking, index compatibility, and four retrieval modes. Later phases add
-diagnosis and evaluation. Real-model benchmark results are
-**TBD (run Colab benchmark)**.
+Offline checks cover index compatibility, four retrieval modes, tool rules,
+citation rejection, and all diagnostic graph routes. Real-model benchmarks
+remain **TBD (run Colab benchmark)**.

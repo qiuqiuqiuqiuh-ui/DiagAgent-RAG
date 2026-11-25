@@ -25,6 +25,11 @@ _LOGGER = logging.getLogger("diagagent.core.embedding")
 
 
 class BaseEmbeddingClient(ManagedClient, ABC):
+    @property
+    @abstractmethod
+    def provider(self) -> str:
+        """Provider identity used when matching the document and query vector spaces."""
+
     def __init__(self, model: str, dimension: int) -> None:
         if dimension < 1:
             raise ValueError("Embedding dimension must be positive")
@@ -54,7 +59,9 @@ class BaseEmbeddingClient(ManagedClient, ABC):
             raise ModelClientError("Expected finite embeddings")
         # Accumulate norms in float64 to handle finite float32 extremes without overflow.
         norms = np.linalg.norm(vectors.astype(np.float64), axis=1, keepdims=True)
-        normalized = np.divide(vectors, np.where(norms == 0, 1, norms), out=np.empty_like(vectors))
+        normalized = np.divide(
+            vectors, np.where(norms == 0, 1, norms), out=np.empty_like(vectors, order="C")
+        )
         log_event(
             _LOGGER,
             "embedding.embed",
@@ -71,6 +78,8 @@ class BaseEmbeddingClient(ManagedClient, ABC):
 
 
 class MockEmbeddingClient(BaseEmbeddingClient):
+    provider = "mock"
+
     def __init__(self, model: str = "mock-hash-v1", dimension: int = 384) -> None:
         super().__init__(model, dimension)
         self._hash_key = blake2b(b"42", digest_size=16).digest()
@@ -95,6 +104,8 @@ class _EmbeddingResponse(BaseModel):
 
 
 class OpenAICompatibleEmbeddingClient(BaseEmbeddingClient):
+    provider = "openai_compatible"
+
     def __init__(
         self, settings: EmbeddingSettings, *, http_client: httpx.Client | None = None
     ) -> None:
@@ -128,6 +139,8 @@ class OpenAICompatibleEmbeddingClient(BaseEmbeddingClient):
 
 
 class SentenceTransformerEmbeddingClient(BaseEmbeddingClient):
+    provider = "sentence_transformers"
+
     def __init__(self, settings: EmbeddingSettings) -> None:
         super().__init__(settings.model, settings.dimension)
         self._device = settings.device

@@ -11,7 +11,7 @@ from numpy.typing import ArrayLike
 from src.core.exceptions import ConfigurationError, ModelClientError
 from src.core.logging import log_event
 from src.core.settings import RerankerSettings
-from src.core.tokenizer import tokenize
+from src.core.tokenizer import code_fallback_terms, tokenize_codes
 
 if TYPE_CHECKING:
     from sentence_transformers import CrossEncoder
@@ -59,12 +59,18 @@ class MockReranker(BaseReranker):
         super().__init__(model)
 
     def _score(self, query: str, candidates: Sequence[str]) -> list[float]:
-        terms = set(tokenize(query))
+        terms = set(tokenize_codes(query))
         if not terms:
             return [0.0] * len(candidates)
-        return [
-            len(terms.intersection(tokenize(candidate))) / len(terms) for candidate in candidates
-        ]
+        scores = []
+        for candidate in candidates:
+            candidate_terms = set(tokenize_codes(candidate, include_components=True))
+            exact = terms & candidate_terms
+            partial = sum(
+                not candidate_terms.isdisjoint(code_fallback_terms(term)) for term in terms - exact
+            )
+            scores.append((len(exact) + 0.5 * partial) / len(terms))
+        return scores
 
 
 class CrossEncoderReranker(BaseReranker):

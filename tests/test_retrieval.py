@@ -1,15 +1,21 @@
 from pathlib import Path
 
+import faiss
+import numpy as np
 import pytest
 
-from src.core.embedding import create_embedding_client
-from src.core.exceptions import IndexValidationError
-from src.core.reranker import create_reranker
-from src.core.settings import Settings, load_settings
+from src.core.embedding import MockEmbeddingClient, create_embedding_client
+from src.core.exceptions import ConfigurationError, IndexValidationError
+from src.core.reranker import MockReranker, create_reranker
+from src.core.settings import IngestionSettings, Settings, load_settings
+from src.ingestion.chunking import chunk_sections
 from src.ingestion.corpus import read_corpus
 from src.ingestion.pipeline import build_index
+from src.ingestion.schemas import Section
+from src.retrieval.bm25 import BM25Retriever
+from src.retrieval.dense import DenseRetriever
 from src.retrieval.hybrid import HybridRetriever, reciprocal_rank_fusion
-from src.retrieval.index import IndexManifest, load_index
+from src.retrieval.index import IndexManifest, load_index, save_index
 from src.retrieval.query import resolve_retrieval_query
 from src.retrieval.tokenizer import tokenize_bm25
 
@@ -46,6 +52,21 @@ def test_equipment_codes_and_lexical_components() -> None:
         "2rs",
         "c3",
     ]
+
+
+def test_code_fallback_agrees_between_bm25_and_mock_reranker() -> None:
+    chunks = chunk_sections(
+        "drive.md",
+        [Section(title="Drive", text="Check OC3 overcurrent")],
+        IngestionSettings(chunk_size=50, chunk_overlap=0),
+    )
+    sparse = BM25Retriever(chunks)
+    assert sparse.search("VFD-OC3")[0].chunk == chunks[0]
+    assert sparse.search("VFD-OC4") == []
+    reranker = MockReranker()
+    assert reranker.score("OC3", ["fault_code: VFD-OC3"]) == [1.0]
+    assert reranker.score("E01.2", ["fault_code: E01.2", "fault_code: E01 and 2"]) == [1.0, 0.5]
+    assert reranker.score("6205-2RS/C3", ["6205-2RS/C3", "6205 2RS C3"]) == [1.0, 0.5]
 
 
 def test_rrf_ranks_by_agreement_and_handles_duplicates() -> None:
@@ -177,3 +198,35 @@ def test_index_version_is_stable_across_identical_generations(
             settings.ingestion,
             expected_corpus_hash="0" * 64,
         )
+
+
+def test_embedding_provider_must_match_profile_and_index(
+    indexed_corpus: tuple[Settings, IndexManifest],
+) -> None:
+    settings, manifest = indexed_corpus
+    stored = load_index(settings.paths.index_dir, settings.embedding, settings.ingestion)
+
+    class WrongProvider(MockEmbeddingClient):
+        provider = "openai_compatible"
+
+    wrong = WrongProvider(manifest.embedding_model, manifest.embedding_dim)
+    with pytest.raises(ConfigurationError, match="provider"):
+        build_index(settings, wrong)
+    with pytest.raises(IndexValidationError, match="provider"):
+        DenseRetriever(stored, wrong)
+
+
+def test_rejects_wrong_faiss_type_before_overwriting_manifest(
+    indexed_corpus: tuple[Settings, IndexManifest],
+) -> None:
+    settings, manifest = indexed_corpus
+    root = settings.paths.index_dir
+    before = (root / "manifest.json").read_bytes()
+    stored = load_index(root, settings.embedding, settings.ingestion)
+    wrong = faiss.IndexFlatL2(manifest.embedding_dim)
+    wrong.add(np.zeros((manifest.chunk_count, manifest.embedding_dim), dtype=np.float32))
+    with pytest.raises(IndexValidationError, match="IndexFlatIP"):
+        save_index(
+            root, wrong, stored.chunks, manifest.corpus_hash, settings.embedding, settings.ingestion
+        )
+    assert (root / "manifest.json").read_bytes() == before

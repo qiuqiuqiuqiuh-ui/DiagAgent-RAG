@@ -104,8 +104,15 @@ def save_index(
     embedding: EmbeddingSettings,
     ingestion: IngestionSettings,
 ) -> IndexManifest:
+    if (
+        not isinstance(vectors, faiss.IndexFlatIP)
+        or vectors.metric_type != faiss.METRIC_INNER_PRODUCT
+    ):
+        raise IndexValidationError("Index artifacts require a FAISS IndexFlatIP")
     if vectors.ntotal != len(chunks) or vectors.d != embedding.dimension or not chunks:
         raise IndexValidationError("FAISS dimensions and rows must match the profile and chunks")
+    if len({chunk.chunk_id for chunk in chunks}) != len(chunks):
+        raise IndexValidationError("Chunk IDs must be unique")
 
     generation = uuid4().hex
     artifacts = index_dir / "generations" / generation

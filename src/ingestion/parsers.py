@@ -5,7 +5,7 @@ from pathlib import Path
 
 from markdown_it import MarkdownIt
 from pypdf import PdfReader
-from pypdf.errors import PdfReadError
+from pypdf.errors import DependencyError, PyPdfError
 
 from src.core.exceptions import CorpusError
 from src.ingestion.schemas import Section
@@ -15,7 +15,8 @@ _MARKDOWN = MarkdownIt("commonmark")
 
 
 def _markdown_sections(text: str, title: str) -> list[Section]:
-    lines = text.splitlines()
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines = text.split("\n")
     tokens = _MARKDOWN.parse(text)
     sections: list[Section] = []
     headings: list[tuple[int, str]] = []
@@ -61,7 +62,7 @@ def parse_csv_records(text: str) -> list[dict[str, str]]:
         raise CorpusError("CSV requires unique, non-empty column names")
     records: list[dict[str, str]] = []
     for row in reader:
-        if not row:
+        if not any(cell.strip() for cell in row):
             continue
         if len(row) != len(headers):
             raise CorpusError(
@@ -74,7 +75,8 @@ def parse_csv_records(text: str) -> list[dict[str, str]]:
 def parse_json_records(text: str) -> list[dict[str, object]]:
     data = json.loads(text)
     if isinstance(data, dict):
-        data = data["records"] if "records" in data else [data]
+        records = data.get("records")
+        data = records if isinstance(records, list) or set(data) == {"records"} else [data]
     if not isinstance(data, list) or any(not isinstance(row, dict) or not row for row in data):
         raise CorpusError(
             "JSON tables require an object, an array of objects, or a records wrapper"
@@ -83,10 +85,12 @@ def parse_json_records(text: str) -> list[dict[str, object]]:
 
 
 def _record_title(record: dict[str, object], fallback: str) -> str:
+    equipment = record.get("equipment_id")
+    prefix = f"{equipment.strip()} " if isinstance(equipment, str) and equipment.strip() else ""
     for field in ("fault_code", "sensor", "id", "name"):
         value = record.get(field)
         if isinstance(value, str) and value.strip():
-            return value.strip()
+            return f"{prefix}{value.strip()}"
     return fallback
 
 
@@ -127,7 +131,7 @@ def parse_document(source_path: str, content: bytes) -> list[Section]:
                 raise CorpusError(f"Unsupported extension {suffix}")
     except CorpusError as exc:
         raise CorpusError(f"{source_path}: {exc}") from exc
-    except (ValueError, csv.Error, PdfReadError) as exc:
+    except (ValueError, csv.Error, PyPdfError, DependencyError) as exc:
         raise CorpusError(f"Could not parse {source_path} ({type(exc).__name__})") from exc
     if not sections:
         detail = " (scanned PDFs require OCR upstream)" if suffix == ".pdf" else ""

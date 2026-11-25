@@ -27,7 +27,9 @@ def read_corpus(corpus_dir: Path, settings: IngestionSettings) -> Corpus:
         (
             path
             for path in root.rglob("*")
-            if path.suffix.lower() in SUPPORTED_SUFFIXES and path.is_file()
+            if path.suffix.lower() in SUPPORTED_SUFFIXES
+            and not any(part.startswith(".") for part in path.relative_to(root).parts)
+            and path.is_file()
         ),
         key=lambda path: path.relative_to(root).as_posix(),
     )

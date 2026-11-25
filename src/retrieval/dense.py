@@ -13,12 +13,13 @@ _LOGGER = logging.getLogger("diagagent.retrieval.dense")
 class DenseRetriever:
     def __init__(self, index: StoredIndex, embedder: BaseEmbeddingClient) -> None:
         manifest = index.manifest
-        if (embedder.model, embedder.dimension) != (
+        if (embedder.provider, embedder.model, embedder.dimension) != (
+            manifest.embedding_provider,
             manifest.embedding_model,
             manifest.embedding_dim,
         ):
             raise IndexValidationError(
-                "Query embedding client model and dimension must match the index"
+                "Query embedding client provider, model, and dimension must match the index"
             )
         self._chunks = index.chunks
         self._vectors = index.vectors
@@ -27,7 +28,7 @@ class DenseRetriever:
     def search(self, query: str, top_k: int = 5) -> list[SearchHit]:
         if top_k < 1:
             raise ValueError("top_k must be positive")
-        if not query.strip():
+        if not self._chunks or not query.strip():
             return []
 
         started = perf_counter()

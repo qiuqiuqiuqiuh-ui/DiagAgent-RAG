@@ -6,6 +6,7 @@ from time import perf_counter
 from rank_bm25 import BM25Okapi
 
 from src.core.logging import log_event
+from src.core.tokenizer import code_fallback_terms
 from src.ingestion.schemas import Chunk
 from src.retrieval.schemas import SearchHit
 from src.retrieval.tokenizer import tokenize_bm25
@@ -31,6 +32,11 @@ class BM25Retriever:
             return []
 
         started = perf_counter()
+        terms = [
+            token
+            for term in terms
+            for token in ((term,) if term in self._positions else code_fallback_terms(term))
+        ]
         matched = sorted({index for term in terms for index in self._positions.get(term, ())})
         scores = self._model.get_batch_scores(terms, matched)
         ranked = sorted(zip(matched, scores, strict=True), key=lambda pair: (-pair[1], pair[0]))

@@ -5,7 +5,7 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 
-from src.core.embedding import create_embedding_client
+from src.core.embedding import BaseEmbeddingClient, create_embedding_client
 from src.core.exceptions import ConfigurationError, ModelClientError
 from src.core.reranker import create_reranker
 from src.core.settings import EmbeddingSettings, RerankerSettings
@@ -18,6 +18,18 @@ EMBEDDING = EmbeddingSettings(
     device="cpu",
 )
 RERANKER = RerankerSettings(provider="sentence_transformers", model="test-reranker", device="cpu")
+
+
+def test_embeddings_normalize_to_contiguous_float32() -> None:
+    class FortranEmbedding(BaseEmbeddingClient):
+        provider = "test"
+
+        def _embed(self, texts):
+            return np.asfortranarray([[3.0, 4.0], [0.0, 0.0]], dtype=np.float32)
+
+    result = FortranEmbedding("test", 2).embed(["one", "two"])
+    assert result.flags.c_contiguous and result.dtype == np.float32
+    np.testing.assert_allclose(result, [[0.6, 0.8], [0.0, 0.0]])
 
 
 def test_optional_provider_import_failure(monkeypatch: pytest.MonkeyPatch) -> None:

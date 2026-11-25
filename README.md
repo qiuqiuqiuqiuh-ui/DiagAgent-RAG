@@ -108,6 +108,9 @@ Use `search.dense.search()` or `search.bm25.search()` for individual rankings,
 and `search.search(..., rerank=False)` for RRF without reranking. The reranker
 score scale is provider-specific. Search results retain the available
 component scores for evaluation.
+BM25 reports raw Okapi scores, which can be negative for terms that occur in
+most documents in a small corpus. These scores describe ranking and are not
+used as evidence thresholds.
 
 ## Verification status
 

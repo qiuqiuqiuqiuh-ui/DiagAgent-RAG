@@ -1,5 +1,8 @@
 from collections.abc import Iterator, Sequence
 
+from pydantic import ValidationError
+
+from src.core.exceptions import CorpusError
 from src.core.settings import IngestionSettings
 from src.ingestion.schemas import Chunk, Section, document_id
 
@@ -35,8 +38,8 @@ def chunk_sections(
         for index, text in enumerate(
             _split_text(section.text, settings.chunk_size, settings.chunk_overlap)
         ):
-            chunks.append(
-                Chunk(
+            try:
+                chunk = Chunk(
                     doc_id=doc_id,
                     source_path=source_path,
                     section_title=section.title,
@@ -46,5 +49,7 @@ def chunk_sections(
                     chunk_id=f"{doc_id}#s{section_index}#c{index}",
                     text=text,
                 )
-            )
+            except ValidationError as exc:
+                raise CorpusError(f"{source_path}: invalid chunk metadata") from exc
+            chunks.append(chunk)
     return chunks

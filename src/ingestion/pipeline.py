@@ -14,12 +14,13 @@ _LOGGER = logging.getLogger("diagagent.ingestion")
 
 
 def build_index(settings: Settings, embedder: BaseEmbeddingClient) -> IndexManifest:
-    if (embedder.model, embedder.dimension) != (
+    if (embedder.provider, embedder.model, embedder.dimension) != (
+        settings.embedding.provider,
         settings.embedding.model,
         settings.embedding.dimension,
     ):
         raise ConfigurationError(
-            "Embedding client model and dimension must match the indexing profile"
+            "Embedding client provider, model, and dimension must match the indexing profile"
         )
 
     started = perf_counter()

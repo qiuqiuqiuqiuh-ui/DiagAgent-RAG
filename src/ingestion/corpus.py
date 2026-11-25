@@ -1,5 +1,6 @@
 import json
-from dataclasses import dataclass
+from collections.abc import Collection
+from dataclasses import dataclass, field
 from hashlib import sha256
 from pathlib import Path
 
@@ -15,9 +16,12 @@ class Corpus:
     chunks: tuple[Chunk, ...]
     corpus_hash: str
     document_count: int
+    captured_sources: dict[str, bytes] = field(default_factory=dict)
 
 
-def read_corpus(corpus_dir: Path, settings: IngestionSettings) -> Corpus:
+def read_corpus(
+    corpus_dir: Path, settings: IngestionSettings, *, capture: Collection[str] = ()
+) -> Corpus:
     """Parse and hash the same byte snapshot of each supported file in path order."""
     root = corpus_dir.resolve()
     if not root.is_dir():
@@ -34,6 +38,7 @@ def read_corpus(corpus_dir: Path, settings: IngestionSettings) -> Corpus:
         key=lambda path: path.relative_to(root).as_posix(),
     )
     chunks: list[Chunk] = []
+    captured: dict[str, bytes] = {}
     fingerprints: list[tuple[str, str]] = []
     for path in paths:
         source_path = path.relative_to(root).as_posix()
@@ -48,8 +53,15 @@ def read_corpus(corpus_dir: Path, settings: IngestionSettings) -> Corpus:
         if path.suffix.lower() != ".pdf":
             content = content.replace(b"\r\n", b"\n")
         fingerprints.append((source_path, sha256(content).hexdigest()))
+        if source_path in capture:
+            captured[source_path] = content
         chunks.extend(chunk_sections(source_path, parse_document(source_path, content), settings))
     if not chunks:
         raise CorpusError(f"No supported, searchable documents in {root}")
     corpus_hash = sha256(json.dumps(fingerprints, separators=(",", ":")).encode()).hexdigest()
-    return Corpus(chunks=tuple(chunks), corpus_hash=corpus_hash, document_count=len(fingerprints))
+    return Corpus(
+        chunks=tuple(chunks),
+        corpus_hash=corpus_hash,
+        document_count=len(fingerprints),
+        captured_sources=captured,
+    )

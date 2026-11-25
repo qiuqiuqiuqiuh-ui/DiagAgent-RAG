@@ -183,6 +183,26 @@ def test_manages_only_owned_clients(monkeypatch: pytest.MonkeyPatch) -> None:
     llm.close()
 
 
+def test_opt_in_json_mode_and_legacy_token_limit() -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert payload["response_format"] == {"type": "json_object"}
+        assert payload["max_tokens"] == 32
+        assert "max_completion_tokens" not in payload
+        return httpx.Response(200, json={"choices": [{"message": {"content": '{"ok":true}'}}]})
+
+    settings = LLMSettings(
+        provider="openai_compatible",
+        model="gateway-chat",
+        api_key=KEY,
+        max_tokens=32,
+        json_mode=True,
+    )
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        llm = create_llm_client(settings, http_client=client)
+        assert llm.generate([ChatMessage(role="user", content="Return JSON")]).text == '{"ok":true}'
+
+
 @pytest.mark.parametrize("status", [429, 503])
 @pytest.mark.parametrize("max_retries", [1, 2])
 def test_bounded_retry_on_transient_status(

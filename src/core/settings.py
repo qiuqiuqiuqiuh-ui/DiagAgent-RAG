@@ -31,8 +31,9 @@ class PathSettings(ProfileSection):
     corpus_dir: Path
     index_dir: Path
     reports_dir: Path
+    cache_file: Path = Path("data/cache/semantic.sqlite3")
 
-    @field_validator("corpus_dir", "index_dir", "reports_dir", mode="before")
+    @field_validator("corpus_dir", "index_dir", "reports_dir", "cache_file", mode="before")
     @classmethod
     def reject_blank_path(cls, value: object) -> object:
         if isinstance(value, str) and not value.strip():
@@ -56,6 +57,10 @@ class RetrievalSettings(ProfileSection):
     rrf_rank_constant: int = Field(default=60, gt=0)
 
 
+class CacheSettings(ProfileSection):
+    similarity_threshold: float = Field(default=0.95, ge=0.95, le=1)
+
+
 class ModelSettings(ProfileSection):
     model: str = Field(min_length=1)
 
@@ -68,6 +73,14 @@ class LLMSettings(ModelSettings):
     max_retries: int = Field(default=2, ge=0)
     temperature: float | None = Field(default=None, ge=0, le=2)
     max_completion_tokens: int | None = Field(default=None, gt=0)
+    max_tokens: int | None = Field(default=None, gt=0)
+    json_mode: bool = False
+
+    @model_validator(mode="after")
+    def validate_token_limit(self) -> "LLMSettings":
+        if self.max_tokens is not None and self.max_completion_tokens is not None:
+            raise ValueError("Set only one of max_tokens or max_completion_tokens")
+        return self
 
 
 class EmbeddingSettings(ModelSettings):
@@ -99,6 +112,7 @@ class Settings(BaseSettings):
     paths: PathSettings
     ingestion: IngestionSettings
     retrieval: RetrievalSettings = Field(default_factory=RetrievalSettings)
+    cache: CacheSettings = Field(default_factory=CacheSettings)
     llm: LLMSettings
     embedding: EmbeddingSettings
     reranker: RerankerSettings
@@ -156,5 +170,6 @@ def load_settings(
         corpus_dir=root / settings.paths.corpus_dir,
         index_dir=root / settings.paths.index_dir,
         reports_dir=root / settings.paths.reports_dir,
+        cache_file=root / settings.paths.cache_file,
     )
     return settings

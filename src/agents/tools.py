@@ -1,5 +1,5 @@
 import csv
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import TypeVar
 
@@ -16,22 +16,37 @@ from src.core.tokenizer import tokenize_codes
 from src.ingestion.parsers import parse_csv_records, parse_json_records
 
 Rule = TypeVar("Rule", FaultCodeRule, SensorThresholdRule)
+FAULT_TABLE = "fault_codes.csv"
+SENSOR_TABLE = "sensor_thresholds.json"
+RULE_TABLES = (FAULT_TABLE, SENSOR_TABLE)
 
 
-def _read_rules(
-    root: Path, filename: str, parse: Callable[[str], Sequence[object]], model: type[Rule]
-) -> list[Rule]:
+def _read_table(root: Path, filename: str) -> bytes | None:
     path = root / filename
     try:
         if path.is_symlink() or not path.resolve().is_relative_to(root):
             raise CorpusError("Rule tables must reside inside the corpus directory")
         if not path.exists():
-            return []
-        return [
-            model.model_validate(record) for record in parse(path.read_text(encoding="utf-8-sig"))
-        ]
-    except (OSError, ValueError, csv.Error, CorpusError) as exc:
+            return None
+        return path.read_bytes()
+    except (OSError, CorpusError) as exc:
         raise CorpusError(f"Invalid rule table {path.name}: {exc}") from exc
+
+
+def _parse_rules(
+    sources: Mapping[str, bytes],
+    filename: str,
+    parse: Callable[[str], Sequence[object]],
+    model: type[Rule],
+) -> list[Rule]:
+    if filename not in sources:
+        return []
+    try:
+        return [
+            model.model_validate(record) for record in parse(sources[filename].decode("utf-8-sig"))
+        ]
+    except (ValueError, csv.Error, CorpusError) as exc:
+        raise CorpusError(f"Invalid rule table {filename}: {exc}") from exc
 
 
 def _index_rules(rules: Sequence[Rule], label: Callable[[Rule], str]) -> dict[str, dict[str, Rule]]:
@@ -72,9 +87,18 @@ class DiagnosticTools:
         root = corpus_dir.resolve()
         if not root.is_dir():
             raise CorpusError(f"Corpus directory does not exist: {root}")
+        sources = {
+            filename: content
+            for filename in RULE_TABLES
+            if (content := _read_table(root, filename)) is not None
+        }
+        return cls.from_sources(sources)
+
+    @classmethod
+    def from_sources(cls, sources: Mapping[str, bytes]) -> "DiagnosticTools":
         return cls(
-            _read_rules(root, "fault_codes.csv", parse_csv_records, FaultCodeRule),
-            _read_rules(root, "sensor_thresholds.json", parse_json_records, SensorThresholdRule),
+            _parse_rules(sources, FAULT_TABLE, parse_csv_records, FaultCodeRule),
+            _parse_rules(sources, SENSOR_TABLE, parse_json_records, SensorThresholdRule),
         )
 
     def equipment_for(self, request: DiagnosticRequest) -> str | None:

@@ -20,9 +20,9 @@ from src.core.tokenizer import tokenize_codes
 from src.ingestion.schemas import Chunk
 
 _QUESTIONS = frozenset(
-    """a an and are as at be by can check could describe diagnose did do does explain fix for
-    from give have help how i in investigate is it know look me mean means my need of on or
-    please should suggest tell the their this to troubleshoot us want was what when where
+    """a about an and are as at be by can check could describe diagnose did do does explain find
+    fix for from give have help how i in investigate is it know look me mean means my need of on or
+    please say should suggest tell the their this to troubleshoot us want was what when where
     which why will with would you""".split()
 )
 _INDUSTRIAL = frozenset(

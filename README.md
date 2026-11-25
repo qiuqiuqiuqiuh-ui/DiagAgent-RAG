@@ -3,7 +3,8 @@
 Retrieval-augmented diagnostics for industrial equipment, using English maintenance
 manuals and structured fault and sensor data by default. The implemented
 workflow indexes that corpus, retrieves evidence, and runs a typed diagnostic
-graph with offline Mock and OpenAI-compatible model policies.
+graph with offline Mock and OpenAI-compatible model policies. A FastAPI service
+exposes the workflow, and an evaluation runner compares four retrieval modes.
 
 ## Target architecture
 
@@ -37,7 +38,7 @@ ruff check .
 ruff format --check .
 pytest -q
 python scripts/ingest.py
-python -m pytest -q tests/test_mock_smoke.py
+python scripts/verify_e2e.py
 ```
 
 On Linux, activate the environment with `source .venv/bin/activate`.
@@ -144,11 +145,72 @@ The deterministic tools load `fault_codes.csv` and `sensor_thresholds.json`.
 Supply sensor readings in the unit recorded in the table. Threshold
 comparisons include equality, and readings shared across multiple equipment
 types need an unambiguous asset ID. Mock mode uses lexical routing and
-extractive evidence checks and keeps tracing local. To use an OpenAI-compatible profile, inject
-its open `llm_client` when creating the diagnostic workflow.
+extractive evidence checks and keeps tracing local. To use an OpenAI-compatible
+profile, inject its open `llm_client` when creating the diagnostic workflow.
 
-## Verification status
+## FastAPI and semantic cache
 
-Offline checks cover index compatibility, four retrieval modes, tool rules,
-citation rejection, and all diagnostic graph routes. Real-model benchmarks
-remain **TBD (run Colab benchmark)**.
+Start the local service with the project's virtual environment active.
+
+```powershell
+python scripts/run_api.py
+```
+
+Use a second PowerShell session to build the configured index and submit a
+diagnosis. `GET /health` reports `not_ready` until a compatible index is loaded.
+The [interactive API documentation](http://127.0.0.1:8000/docs) lists the full
+request and response schemas.
+
+```powershell
+Invoke-RestMethod 'http://127.0.0.1:8000/v1/ingest' -Method Post
+$diagnosis = @{ query = 'What does VFD-OC3 mean?'; equipment_id = 'DRV-300' } | ConvertTo-Json
+Invoke-RestMethod 'http://127.0.0.1:8000/v1/diagnose' -Method Post -ContentType 'application/json' -Body $diagnosis
+```
+
+The SQLite cache stores grounded answers under the index version, model
+profile, and a normalized case context that includes equipment, fault codes,
+exact sensor values, and rule units. A query must meet cosine similarity of
+at least 0.95 within that scope. `bypass_cache` skips both lookup and write.
+The API emits traces for fresh responses when `include_trace` is enabled
+and sets `cache_hit` when reusing an answer. Keep the cache file on the
+local filesystem. Rebuild the index through the running service to publish
+a new snapshot for subsequent requests.
+
+## Evaluation and Colab
+
+Use the current index with either labeled dataset.
+
+```powershell
+python scripts/evaluate.py --dataset data/eval/golden_smoke.jsonl
+python scripts/evaluate.py --config configs/colab.yaml --dataset data/eval/golden_bench.jsonl
+```
+
+The smoke set contains 15 cases, including three abstention or out-of-scope
+cases. The benchmark set contains 54 cases, including eight abstention or
+out-of-scope cases. Both sets use the shipped sample corpus. The runner writes
+timestamped JSON and Markdown under the configured reports directory.
+Reports identify the dataset hash, index and model profile. They include
+Recall@K, MRR@K, NDCG@K, citation and tool metrics, routing and abstention
+accuracy, and P50/P95 workflow latency. Add `--judge` to a live run for
+optional faithfulness scoring with the configured LLM.
+
+Open [colab_gpu_pipeline.ipynb](notebooks/colab_gpu_pipeline.ipynb) in Colab
+with a GPU runtime. The notebook mounts Drive, uses the repository at
+`MyDrive/DiagAgent-RAG`, and reads the secret `DIAGAGENT_LLM_API_KEY`.
+It installs a Python 3.11 environment, checks CUDA, builds the index with
+GPU embeddings, and compares all four modes on the benchmark set. The
+matching cell script is
+[colab_gpu_pipeline.py](notebooks/colab_gpu_pipeline.py). Gateway profiles
+can opt into JSON mode with `llm.json_mode` and choose the token-limit
+parameter their endpoint supports.
+
+| Retrieval mode | Real Colab GPU results |
+|---|---|
+| Dense only | TBD (run Colab benchmark) |
+| BM25 only | TBD (run Colab benchmark) |
+| Hybrid RRF | TBD (run Colab benchmark) |
+| Hybrid with reranking | TBD (run Colab benchmark) |
+
+`python scripts/verify_e2e.py` is the offline Antigravity entry point. It
+uses temporary index, cache and report paths and exercises ingestion, the
+manifest, the FastAPI request paths and all four Mock evaluation modes.

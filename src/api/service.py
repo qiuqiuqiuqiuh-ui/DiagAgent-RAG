@@ -1,0 +1,146 @@
+import logging
+import sqlite3
+from dataclasses import dataclass
+from threading import Lock
+from time import perf_counter
+
+from src.agents.tools import RULE_TABLES, DiagnosticTools
+from src.agents.workflow import DiagnosticWorkflow, create_diagnostic_workflow
+from src.api.cache import CacheScope, SQLiteSemanticCache, context_hash, profile_hash
+from src.api.schemas import DiagnoseRequest, DiagnoseResponse, HealthResponse
+from src.core.embedding import BaseEmbeddingClient
+from src.core.exceptions import CorpusError, DiagAgentError, IndexValidationError, ModelClientError
+from src.core.llm import BaseLLMClient
+from src.core.logging import log_event
+from src.core.reranker import BaseReranker
+from src.core.settings import Settings
+from src.ingestion.corpus import read_corpus
+from src.ingestion.pipeline import build_index
+from src.retrieval.hybrid import HybridRetriever
+from src.retrieval.index import IndexManifest, load_index
+
+_LOGGER = logging.getLogger("diagagent.api")
+
+
+class IndexNotReady(DiagAgentError):
+    """The service needs a valid index before running a diagnosis."""
+
+
+@dataclass(frozen=True)
+class _Snapshot:
+    manifest: IndexManifest
+    tools: DiagnosticTools
+    workflow: DiagnosticWorkflow
+
+
+class DiagnosticService:
+    def __init__(
+        self,
+        settings: Settings,
+        embedder: BaseEmbeddingClient,
+        reranker: BaseReranker,
+        llm: BaseLLMClient,
+    ) -> None:
+        self._settings = settings
+        self._embedding = embedder
+        self._reranker = reranker
+        self._llm = llm
+        self._cache = SQLiteSemanticCache(
+            settings.paths.cache_file, settings.cache.similarity_threshold
+        )
+        self._profile_hash = profile_hash(settings)
+        self._snapshot: _Snapshot | None = None
+        self._ingest_lock = Lock()
+
+    def _load_snapshot(self, *, rebuild: bool) -> _Snapshot:
+        settings = self._settings
+        corpus = read_corpus(settings.paths.corpus_dir, settings.ingestion, capture=RULE_TABLES)
+        tools = DiagnosticTools.from_sources(corpus.captured_sources)
+        if rebuild:
+            build_index(settings, self._embedding, corpus=corpus)
+        stored = load_index(
+            settings.paths.index_dir,
+            settings.embedding,
+            settings.ingestion,
+            expected_corpus_hash=corpus.corpus_hash,
+        )
+        retriever = HybridRetriever(
+            stored, self._embedding, self._reranker, settings=settings.retrieval
+        )
+        workflow = create_diagnostic_workflow(
+            settings, retriever, llm_client=self._llm, tools=tools
+        )
+        return _Snapshot(stored.manifest, tools, workflow)
+
+    def load_existing(self) -> None:
+        if not (self._settings.paths.index_dir / "manifest.json").exists():
+            return
+        try:
+            self._snapshot = self._load_snapshot(rebuild=False)
+        except (CorpusError, IndexValidationError) as exc:
+            log_event(
+                _LOGGER, "api.index_load_failed", level=logging.WARNING, reason=type(exc).__name__
+            )
+
+    def health(self) -> HealthResponse:
+        snapshot = self._snapshot
+        if snapshot is None:
+            return HealthResponse(status="not_ready")
+        return HealthResponse(
+            status="ok",
+            index_version=snapshot.manifest.index_version,
+            chunk_count=snapshot.manifest.chunk_count,
+        )
+
+    def ingest(self) -> IndexManifest:
+        with self._ingest_lock:
+            snapshot = self._load_snapshot(rebuild=True)
+            self._snapshot = snapshot
+            return snapshot.manifest
+
+    def diagnose(self, request: DiagnoseRequest) -> DiagnoseResponse:
+        started = perf_counter()
+        snapshot = self._snapshot
+        if snapshot is None:
+            raise IndexNotReady("Build a compatible index with POST /v1/ingest before diagnosing.")
+
+        diagnosis = request.diagnostic_request()
+        scope = embedding = result = None
+        if not request.bypass_cache:
+            scope = CacheScope(
+                snapshot.manifest.index_version,
+                self._profile_hash,
+                context_hash(diagnosis, snapshot.tools),
+            )
+            try:
+                embedding = self._embedding.embed([diagnosis.query])[0]
+                result = self._cache.lookup(scope, embedding)
+            except (sqlite3.Error, ModelClientError) as exc:
+                log_event(
+                    _LOGGER, "cache.lookup_failed", level=logging.WARNING, reason=type(exc).__name__
+                )
+
+        cache_hit = result is not None
+        if result is None:
+            result = snapshot.workflow.invoke(diagnosis, include_trace=request.include_trace)
+            if scope is not None and embedding is not None:
+                try:
+                    self._cache.store(scope, diagnosis.query, embedding, result)
+                except sqlite3.Error as exc:
+                    log_event(
+                        _LOGGER,
+                        "cache.store_failed",
+                        level=logging.WARNING,
+                        reason=type(exc).__name__,
+                    )
+
+        log_event(
+            _LOGGER,
+            "api.diagnose",
+            cache_hit=cache_hit,
+            bypass_cache=request.bypass_cache,
+            index_version=snapshot.manifest.index_version,
+            status=result.status,
+            latency_ms=(perf_counter() - started) * 1000,
+        )
+        return DiagnoseResponse(**result.model_dump(), cache_hit=cache_hit)

@@ -7,13 +7,15 @@ from src.core.embedding import BaseEmbeddingClient
 from src.core.exceptions import ConfigurationError
 from src.core.logging import log_event
 from src.core.settings import Settings
-from src.ingestion.corpus import read_corpus
+from src.ingestion.corpus import Corpus, read_corpus
 from src.retrieval.index import IndexManifest, save_index
 
 _LOGGER = logging.getLogger("diagagent.ingestion")
 
 
-def build_index(settings: Settings, embedder: BaseEmbeddingClient) -> IndexManifest:
+def build_index(
+    settings: Settings, embedder: BaseEmbeddingClient, *, corpus: Corpus | None = None
+) -> IndexManifest:
     if (embedder.provider, embedder.model, embedder.dimension) != (
         settings.embedding.provider,
         settings.embedding.model,
@@ -24,7 +26,8 @@ def build_index(settings: Settings, embedder: BaseEmbeddingClient) -> IndexManif
         )
 
     started = perf_counter()
-    corpus = read_corpus(settings.paths.corpus_dir, settings.ingestion)
+    if corpus is None:
+        corpus = read_corpus(settings.paths.corpus_dir, settings.ingestion)
     index = faiss.IndexFlatIP(embedder.dimension)
     batch_size = settings.embedding.batch_size
     for offset in range(0, len(corpus.chunks), batch_size):

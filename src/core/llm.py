@@ -111,8 +111,10 @@ class OpenAICompatibleLLMClient(BaseLLMClient):
     def __init__(self, settings: LLMSettings, *, http_client: httpx.Client | None = None) -> None:
         super().__init__(settings.model)
         self._generation_parameters = settings.model_dump(
-            include={"temperature", "max_completion_tokens"}, exclude_none=True
+            include={"temperature", "max_completion_tokens", "max_tokens"}, exclude_none=True
         )
+        if settings.json_mode:
+            self._generation_parameters["response_format"] = {"type": "json_object"}
         self._transport = OpenAICompatibleTransport(
             str(settings.base_url),
             settings.api_key,

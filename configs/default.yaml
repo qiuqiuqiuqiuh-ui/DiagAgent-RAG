@@ -1,0 +1,21 @@
+domain:
+  name: Industrial Equipment Fault Diagnosis & Maintenance Manuals
+  language: en
+paths:
+  corpus_dir: data/raw
+  index_dir: data/index
+  reports_dir: reports/generated
+ingestion:
+  chunk_size: 1000
+  chunk_overlap: 150
+llm:
+  provider: mock
+  model: mock-llm-v1
+embedding:
+  provider: mock
+  model: mock-hash-v1
+  dimension: 384
+reranker:
+  provider: mock
+  model: mock-keyword-v1
+log_level: INFO

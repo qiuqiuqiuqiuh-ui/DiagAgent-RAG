@@ -1,0 +1,16 @@
+.venv/
+.venv310/
+.env
+.env.*
+!.env.example
+data/index/
+*.sqlite*
+reports/generated/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+*.egg-info/
+build/
+dist/

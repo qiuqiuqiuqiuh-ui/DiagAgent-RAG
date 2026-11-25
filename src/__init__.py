@@ -1,0 +1,1 @@
+"""Industrial equipment diagnostic system."""

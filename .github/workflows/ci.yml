@@ -1,0 +1,39 @@
+name: CI
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Python ${{ matrix.python-version }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.10", "3.11"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements.txt
+      - run: python -m pip install -r requirements.txt
+      - run: ruff check .
+      - run: pytest -q
+      - name: Mock smoke evaluation
+        shell: pwsh
+        run: |
+          if (Test-Path 'scripts/verify_e2e.py') {
+            python scripts/verify_e2e.py
+          } else {
+            python -m pytest -q tests/test_mock_smoke.py
+          }
+          exit $LASTEXITCODE

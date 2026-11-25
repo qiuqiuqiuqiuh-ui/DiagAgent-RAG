@@ -9,6 +9,7 @@ from pydantic import (
     Field,
     SecretStr,
     ValidationError,
+    field_validator,
     model_validator,
 )
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
@@ -31,6 +32,13 @@ class PathSettings(ProfileSection):
     index_dir: Path
     reports_dir: Path
 
+    @field_validator("corpus_dir", "index_dir", "reports_dir", mode="before")
+    @classmethod
+    def reject_blank_path(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            raise ValueError("Path must not be blank")
+        return value
+
 
 class IngestionSettings(ProfileSection):
     chunk_size: int = Field(gt=0)
@@ -52,6 +60,9 @@ class LLMSettings(ModelSettings):
     base_url: AnyHttpUrl = AnyHttpUrl("https://api.openai.com/v1")
     api_key: SecretStr | None = None
     timeout_seconds: float = Field(default=30, gt=0, allow_inf_nan=False)
+    max_retries: int = Field(default=2, ge=0)
+    temperature: float | None = Field(default=None, ge=0, le=2)
+    max_completion_tokens: int | None = Field(default=None, gt=0)
 
 
 class EmbeddingSettings(ModelSettings):
@@ -60,6 +71,8 @@ class EmbeddingSettings(ModelSettings):
     base_url: AnyHttpUrl = AnyHttpUrl("https://api.openai.com/v1")
     api_key: SecretStr | None = None
     timeout_seconds: float = Field(default=30, gt=0, allow_inf_nan=False)
+    max_retries: int = Field(default=2, ge=0)
+    batch_size: int = Field(default=32, gt=0)
     request_dimensions: bool = False
     device: str | None = None
 
@@ -84,6 +97,11 @@ class Settings(BaseSettings):
     embedding: EmbeddingSettings
     reranker: RerankerSettings
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+
+    @field_validator("log_level", mode="before")
+    @classmethod
+    def normalize_log_level(cls, value: object) -> object:
+        return value.strip().upper() if isinstance(value, str) else value
 
     @classmethod
     def settings_customise_sources(
@@ -123,11 +141,9 @@ def load_settings(
     try:
         settings = Settings(_env_file=root / env_file if env_file is not None else None, **values)
     except ValidationError as exc:
-        fields = ", ".join(
-            ".".join(str(part) for part in issue["loc"]) for issue in exc.errors()
-        )
+        fields = ", ".join(".".join(str(part) for part in issue["loc"]) for issue in exc.errors())
         raise ConfigurationError(f"Invalid settings in {profile}: {fields}") from None
-    except (OSError, SettingsError) as exc:
+    except (OSError, UnicodeError, SettingsError) as exc:
         raise ConfigurationError(f"Could not load settings for {profile}") from exc
 
     settings.paths = PathSettings(

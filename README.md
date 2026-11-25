@@ -33,6 +33,7 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 ruff check .
+ruff format --check .
 pytest -q
 python -m pytest -q tests/test_mock_smoke.py
 ```
@@ -55,6 +56,12 @@ and embedding clients accept an injectable HTTP transport for offline contract t
 Set `DIAGAGENT_LLM__API_KEY` or `DIAGAGENT_EMBEDDING__API_KEY` for the corresponding
 live provider. [OpenAI API reference](https://developers.openai.com/api/reference/) ·
 [Sentence Transformers documentation](https://www.sbert.net/)
+
+Use the project virtual environment when importing `src.core`. Use OpenAI-compatible
+clients as context managers or call `close()` to release their connection pools.
+The settings support `max_retries` for each HTTP client, `batch_size` for embeddings,
+and optional `temperature` and `max_completion_tokens` for chat completion.
+Embedding results are finite `float32` arrays with L2-normalized nonzero rows.
 
 ## Verification status
 

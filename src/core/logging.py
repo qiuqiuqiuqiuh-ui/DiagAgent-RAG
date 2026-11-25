@@ -13,6 +13,10 @@ class JsonFormatter(logging.Formatter):
             "event": record.getMessage(),
             "fields": getattr(record, "event_fields", {}),
         }
+        if record.exc_info:
+            payload["exception"] = self.formatException(record.exc_info)
+        if record.stack_info:
+            payload["stack"] = self.formatStack(record.stack_info)
         return json.dumps(payload, ensure_ascii=False, default=str)
 
 
@@ -21,7 +25,7 @@ def configure_logging(level: str = "INFO", *, stream: TextIO | None = None) -> N
     logger = logging.getLogger("diagagent")
     logger.setLevel(level)
     logger.propagate = False
-    for installed in logger.handlers:
+    for installed in list(logger.handlers):
         if installed.name == "diagagent-json":
             logger.removeHandler(installed)
             installed.close()
@@ -32,5 +36,7 @@ def configure_logging(level: str = "INFO", *, stream: TextIO | None = None) -> N
     logger.addHandler(handler)
 
 
-def log_event(logger: logging.Logger, event: str, **fields: object) -> None:
-    logger.info(event, extra={"event_fields": fields})
+def log_event(
+    logger: logging.Logger, event: str, *, level: int = logging.INFO, **fields: object
+) -> None:
+    logger.log(level, event, extra={"event_fields": fields})

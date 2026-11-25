@@ -11,6 +11,7 @@ import numpy as np
 from numpy.typing import ArrayLike, NDArray
 from pydantic import BaseModel, Field
 
+from src.core.client import ManagedClient
 from src.core.exceptions import ConfigurationError, ModelClientError
 from src.core.logging import log_event
 from src.core.openai_compatible import OpenAICompatibleTransport
@@ -23,7 +24,7 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger("diagagent.core.embedding")
 
 
-class BaseEmbeddingClient(ABC):
+class BaseEmbeddingClient(ManagedClient, ABC):
     def __init__(self, model: str, dimension: int) -> None:
         if dimension < 1:
             raise ValueError("Embedding dimension must be positive")
@@ -31,7 +32,9 @@ class BaseEmbeddingClient(ABC):
         self.dimension = dimension
 
     def embed(self, texts: Sequence[str]) -> NDArray[np.float32]:
-        """Return a finite float32 matrix shaped (number of texts, dimension)."""
+        """Return finite float32 embeddings, with each nonzero row L2-normalized."""
+        if isinstance(texts, (str, bytes)):
+            raise TypeError("texts must be a sequence of strings, not str/bytes")
         if not texts:
             return np.empty((0, self.dimension), dtype=np.float32)
 
@@ -43,8 +46,15 @@ class BaseEmbeddingClient(ABC):
         except (TypeError, ValueError, OverflowError):
             raise ModelClientError("The embedding provider returned invalid vectors") from None
         expected_shape = (len(texts), self.dimension)
-        if vectors.shape != expected_shape or not np.isfinite(vectors).all():
-            raise ModelClientError(f"Expected finite embeddings with shape {expected_shape}")
+        if vectors.shape != expected_shape:
+            raise ModelClientError(
+                f"Expected embeddings with shape {expected_shape}, got {vectors.shape}"
+            )
+        if not np.isfinite(vectors).all():
+            raise ModelClientError("Expected finite embeddings")
+        # Accumulate norms in float64 to handle finite float32 extremes without overflow.
+        norms = np.linalg.norm(vectors.astype(np.float64), axis=1, keepdims=True)
+        normalized = np.divide(vectors, np.where(norms == 0, 1, norms), out=np.empty_like(vectors))
         log_event(
             _LOGGER,
             "embedding.embed",
@@ -53,7 +63,7 @@ class BaseEmbeddingClient(ABC):
             input_count=len(texts),
             embedding_dim=self.dimension,
         )
-        return vectors
+        return normalized
 
     @abstractmethod
     def _embed(self, texts: Sequence[str]) -> ArrayLike:
@@ -72,9 +82,6 @@ class MockEmbeddingClient(BaseEmbeddingClient):
                 digest = blake2b(token.encode("utf-8"), key=self._hash_key, digest_size=9).digest()
                 position = int.from_bytes(digest[:8], "big") % self.dimension
                 vector[position] += 1.0 if digest[-1] & 1 else -1.0
-            norm = np.linalg.norm(vector)
-            if norm:
-                vector /= norm
         return vectors
 
 
@@ -93,25 +100,38 @@ class OpenAICompatibleEmbeddingClient(BaseEmbeddingClient):
     ) -> None:
         super().__init__(settings.model, settings.dimension)
         self._request_dimensions = settings.request_dimensions
+        self._batch_size = settings.batch_size
         self._transport = OpenAICompatibleTransport(
-            str(settings.base_url), settings.api_key, settings.timeout_seconds, client=http_client
+            str(settings.base_url),
+            settings.api_key,
+            settings.timeout_seconds,
+            max_retries=settings.max_retries,
+            client=http_client,
         )
 
+    def close(self) -> None:
+        self._transport.close()
+
     def _embed(self, texts: Sequence[str]) -> list[list[float]]:
-        payload: dict[str, object] = {"model": self.model, "input": list(texts)}
-        if self._request_dimensions:
-            payload["dimensions"] = self.dimension
-        result = self._transport.post("embeddings", payload, _EmbeddingResponse)
-        ordered = sorted(result.data, key=lambda item: item.index)
-        if [item.index for item in ordered] != list(range(len(texts))):
-            raise ModelClientError("Embedding results must cover each input index exactly once")
-        return [item.embedding for item in ordered]
+        embeddings: list[list[float]] = []
+        for offset in range(0, len(texts), self._batch_size):
+            batch = list(texts[offset : offset + self._batch_size])
+            payload: dict[str, object] = {"model": self.model, "input": batch}
+            if self._request_dimensions:
+                payload["dimensions"] = self.dimension
+            result = self._transport.post("embeddings", payload, _EmbeddingResponse)
+            ordered = sorted(result.data, key=lambda item: item.index)
+            if [item.index for item in ordered] != list(range(len(batch))):
+                raise ModelClientError("Embedding results must cover each input index exactly once")
+            embeddings.extend(item.embedding for item in ordered)
+        return embeddings
 
 
 class SentenceTransformerEmbeddingClient(BaseEmbeddingClient):
     def __init__(self, settings: EmbeddingSettings) -> None:
         super().__init__(settings.model, settings.dimension)
         self._device = settings.device
+        self._batch_size = settings.batch_size
 
     @cached_property
     def _encoder(self) -> "SentenceTransformer":
@@ -127,8 +147,8 @@ class SentenceTransformerEmbeddingClient(BaseEmbeddingClient):
         try:
             return self._encoder.encode(
                 list(texts),
+                batch_size=self._batch_size,
                 convert_to_numpy=True,
-                normalize_embeddings=True,
                 show_progress_bar=False,
             )
         except (OSError, RuntimeError, ValueError) as exc:
@@ -142,4 +162,6 @@ def create_embedding_client(
         return MockEmbeddingClient(settings.model, settings.dimension)
     if settings.provider == "openai_compatible":
         return OpenAICompatibleEmbeddingClient(settings, http_client=http_client)
-    return SentenceTransformerEmbeddingClient(settings)
+    if settings.provider == "sentence_transformers":
+        return SentenceTransformerEmbeddingClient(settings)
+    raise ConfigurationError("Unsupported embedding provider")

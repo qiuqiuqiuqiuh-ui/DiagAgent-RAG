@@ -73,3 +73,30 @@ def test_rejects_invalid_profiles(tmp_path: Path, contents: str, error: str) -> 
 def test_rejects_missing_profile(tmp_path: Path) -> None:
     with pytest.raises(ConfigurationError, match="Could not read YAML profile"):
         load_settings(project_root=tmp_path, env_file=None)
+
+
+@pytest.mark.parametrize("value", ["", " \t "])
+@pytest.mark.parametrize("field", ["CORPUS_DIR", "INDEX_DIR", "REPORTS_DIR"])
+def test_rejects_blank_path_overrides(
+    monkeypatch: pytest.MonkeyPatch, value: str, field: str
+) -> None:
+    monkeypatch.setenv(f"DIAGAGENT_PATHS__{field}", value)
+    with pytest.raises(ConfigurationError, match=rf"paths\.{field.lower()}"):
+        load_settings(project_root=PROJECT_ROOT, env_file=None)
+
+
+def test_rejects_invalid_dotenv_encoding(tmp_path: Path) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text("DIAGAGENT_LOG_LEVEL=INFO", encoding="utf-16")
+    with pytest.raises(ConfigurationError, match="Could not load settings"):
+        load_settings(project_root=PROJECT_ROOT, env_file=env_path)
+
+
+def test_normalizes_log_level_and_rejects_nonpositive_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DIAGAGENT_LOG_LEVEL", " info ")
+    assert load_settings(project_root=PROJECT_ROOT, env_file=None).log_level == "INFO"
+    monkeypatch.setenv("DIAGAGENT_EMBEDDING__BATCH_SIZE", "0")
+    with pytest.raises(ConfigurationError, match=r"embedding\.batch_size"):
+        load_settings(project_root=PROJECT_ROOT, env_file=None)

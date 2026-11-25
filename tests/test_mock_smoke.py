@@ -5,10 +5,11 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from pydantic import ValidationError
 
 from src.core.embedding import MockEmbeddingClient, create_embedding_client
 from src.core.llm import ChatMessage, MockLLMClient, create_llm_client
-from src.core.logging import configure_logging
+from src.core.logging import configure_logging, log_event
 from src.core.reranker import MockReranker, create_reranker
 from src.core.settings import load_settings
 from src.core.tokenizer import tokenize
@@ -69,3 +70,40 @@ def test_mock_boundary_cases() -> None:
     assert reranker.score("", ["any text"]) == [0.0]
     with pytest.raises(ValueError, match="At least one"):
         MockLLMClient().generate([])
+    with pytest.raises(ValidationError, match="must not be blank"):
+        ChatMessage(role="user", content=" \t\n")
+
+
+@pytest.mark.parametrize("batch", ["VFD-OC3", b"abc"])
+def test_rejects_bare_strings_for_batch_clients(batch: str | bytes) -> None:
+    with pytest.raises(TypeError, match="texts must be a sequence"):
+        MockEmbeddingClient().embed(batch)
+    with pytest.raises(TypeError, match="candidates must be a sequence"):
+        MockReranker().score("q", batch)
+
+
+def test_logging_replaces_duplicate_handlers_and_keeps_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logger = logging.getLogger("diagagent")
+    monkeypatch.setattr(logger, "handlers", [])
+    monkeypatch.setattr(logger, "level", logger.level)
+    monkeypatch.setattr(logger, "propagate", logger.propagate)
+    for _ in range(2):
+        handler = logging.StreamHandler(StringIO())
+        handler.set_name("diagagent-json")
+        logger.addHandler(handler)
+
+    stream = StringIO()
+    configure_logging(stream=stream)
+    assert [handler.name for handler in logger.handlers] == ["diagagent-json"]
+    log_event(logger, "retry", level=logging.WARNING, attempt=1)
+    try:
+        raise ValueError("invalid value")
+    except ValueError:
+        logger.exception("failed", stack_info=True)
+    warning, error = [json.loads(line) for line in stream.getvalue().splitlines()]
+    assert warning["level"] == "WARNING"
+    assert warning["fields"] == {"attempt": 1}
+    assert "ValueError: invalid value" in error["exception"]
+    assert "Stack (most recent call last)" in error["stack"]

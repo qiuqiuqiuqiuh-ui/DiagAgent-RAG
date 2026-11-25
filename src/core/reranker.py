@@ -25,6 +25,8 @@ class BaseReranker(ABC):
 
     def score(self, query: str, candidates: Sequence[str]) -> list[float]:
         """Return one finite relevance score per candidate in input order."""
+        if isinstance(candidates, (str, bytes)):
+            raise TypeError("candidates must be a sequence of strings, not str/bytes")
         if not candidates:
             return []
 
@@ -82,16 +84,20 @@ class CrossEncoderReranker(BaseReranker):
 
     def _score(self, query: str, candidates: Sequence[str]) -> ArrayLike:
         try:
-            return self._encoder.predict(
+            result = self._encoder.predict(
                 [(query, text) for text in candidates],
                 convert_to_numpy=True,
                 show_progress_bar=False,
             )
+            scores = np.asarray(result)
         except (OSError, RuntimeError, ValueError) as exc:
             raise ModelClientError("Cross-encoder scoring failed") from exc
+        return scores[:, 0] if scores.shape == (len(candidates), 1) else scores
 
 
 def create_reranker(settings: RerankerSettings) -> BaseReranker:
     if settings.provider == "mock":
         return MockReranker(settings.model)
-    return CrossEncoderReranker(settings)
+    if settings.provider == "sentence_transformers":
+        return CrossEncoderReranker(settings)
+    raise ConfigurationError("Unsupported reranker provider")

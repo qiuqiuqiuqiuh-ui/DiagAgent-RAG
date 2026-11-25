@@ -1,0 +1,9 @@
+fault_code,equipment_id,severity,meaning,first_check,escalation
+VFD-OC3,DRV-300,trip,Acceleration overcurrent,Compare the current and speed traces,Electrical maintenance for repeat trips
+VFD-UV1,DRV-300,trip,DC bus undervoltage,Correlate upstream supply events,Electrical maintenance if repeated
+E01.2,DRV-300,warning,Cooling fan feedback missing,Review fan feedback and drive events,Drive service for recurring loss
+MTR-TH1,MX-200,alarm,Winding overtemperature,Compare winding RTD and phase currents,Electrical maintenance for repeat alarms
+BRG-VIB2,BRG-17,alarm,Elevated bearing vibration,Compare drive-end velocity at the same load,Mechanical maintenance for increasing trend
+ERR-402,CV-40,alarm,Encoder pulse loss,Compare speed command and encoder feedback,Controls maintenance for repeated events
+GBX-OL1,CV-40,alarm,Low gearbox oil pressure,Record oil pressure and temperature,Mechanical maintenance for a declining trend
+PMP-LF1,PM-14,warning,Low measured pump flow,Record pressure and flow at the current duty point,Pump maintenance if warning persists

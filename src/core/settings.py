@@ -51,6 +51,11 @@ class IngestionSettings(ProfileSection):
         return self
 
 
+class RetrievalSettings(ProfileSection):
+    candidate_k: int = Field(default=20, gt=0)
+    rrf_rank_constant: int = Field(default=60, gt=0)
+
+
 class ModelSettings(ProfileSection):
     model: str = Field(min_length=1)
 
@@ -93,6 +98,7 @@ class Settings(BaseSettings):
     domain: DomainSettings
     paths: PathSettings
     ingestion: IngestionSettings
+    retrieval: RetrievalSettings = Field(default_factory=RetrievalSettings)
     llm: LLMSettings
     embedding: EmbeddingSettings
     reranker: RerankerSettings

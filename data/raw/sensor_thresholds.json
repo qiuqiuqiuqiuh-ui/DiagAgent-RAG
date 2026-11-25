@@ -1,0 +1,52 @@
+{
+  "records": [
+    {
+      "equipment_id": "MX-200",
+      "sensor": "winding_temp",
+      "unit": "degC",
+      "warning_threshold": 105,
+      "critical_threshold": 120,
+      "direction": "high"
+    },
+    {
+      "equipment_id": "BRG-17",
+      "sensor": "drive_end_vibration",
+      "unit": "mm/s RMS",
+      "warning_threshold": 4.5,
+      "critical_threshold": 7.1,
+      "direction": "high"
+    },
+    {
+      "equipment_id": "BRG-17",
+      "sensor": "bearing_housing_temp",
+      "unit": "degC",
+      "warning_threshold": 75,
+      "critical_threshold": 90,
+      "direction": "high"
+    },
+    {
+      "equipment_id": "CV-40",
+      "sensor": "gearbox_oil_pressure",
+      "unit": "bar",
+      "warning_threshold": 1.8,
+      "critical_threshold": 1.4,
+      "direction": "low"
+    },
+    {
+      "equipment_id": "PM-14",
+      "sensor": "winding_temp",
+      "unit": "degC",
+      "warning_threshold": 100,
+      "critical_threshold": 115,
+      "direction": "high"
+    },
+    {
+      "equipment_id": "PM-14",
+      "sensor": "pump_flow",
+      "unit": "L/min",
+      "warning_threshold": 42,
+      "critical_threshold": 32,
+      "direction": "low"
+    }
+  ]
+}

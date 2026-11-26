@@ -39,6 +39,7 @@ class CaseResult(BaseModel):
     abstention_correct: bool
     latency_ms: FiniteFloat
     faithfulness: float | None = None
+    retrieval_attempted: bool | None = None
 
 
 class MetricSummary(BaseModel):
@@ -59,6 +60,7 @@ class MetricSummary(BaseModel):
     latency_p50_ms: float
     latency_p95_ms: float
     faithfulness: float | None
+    retrieval_attempted_samples: int | None = None
 
 
 def score_ranking(ranked: Sequence[str], gold: set[str], k: int) -> RankingMetrics | None:
@@ -107,15 +109,16 @@ def _tools_match(expected: Sequence[ExpectedTool], actual: Sequence[ToolFinding]
 def score_case(
     case: EvalCase,
     result: DiagnosticResult,
-    first_chunks: Sequence[Chunk],
+    first_chunks: Sequence[Chunk] | None,
     final_chunks: Sequence[Chunk],
     *,
     k: int,
     latency_ms: float,
     faithfulness: float | None = None,
 ) -> CaseResult:
+    """Score a workflow result. None means the first retrieval was never attempted."""
     gold = set(case.relevant_chunks)
-    retrieved = tuple(chunk.chunk_id for chunk in first_chunks[:k])
+    retrieved = tuple(chunk.chunk_id for chunk in (first_chunks or ())[:k])
     cited = tuple(item.chunk_id for item in result.citations)
     citation_valid = None
     if result.status == "answered" or cited:
@@ -143,6 +146,7 @@ def score_case(
         abstention_correct=(result.status == "answered") == (case.expected_status == "answered"),
         latency_ms=latency_ms,
         faithfulness=faithfulness,
+        retrieval_attempted=first_chunks is not None,
     )
 
 
@@ -155,6 +159,7 @@ def summarize(results: Sequence[CaseResult]) -> MetricSummary:
     if not results:
         raise ValueError("At least one case is required to summarize metrics")
     rankings = [case.ranking for case in results if case.ranking is not None]
+    retrieval_attempts = [case.retrieval_attempted for case in results if case.ranking is not None]
     p50, p95 = np.percentile([case.latency_ms for case in results], [50, 95])
     return MetricSummary(
         samples=len(results),
@@ -174,4 +179,7 @@ def summarize(results: Sequence[CaseResult]) -> MetricSummary:
         latency_p50_ms=float(p50),
         latency_p95_ms=float(p95),
         faithfulness=_average(case.faithfulness for case in results),
+        retrieval_attempted_samples=(
+            None if None in retrieval_attempts else retrieval_attempts.count(True)
+        ),
     )

@@ -276,6 +276,77 @@ The four mode runs took 35.3 minutes in total. The latency rows measure the
 full diagnosis workflow, including remote calls to `deepseek-flash`. The
 connectivity probe returned reasoning output.
 
+#### Routing candidate on the Qianwen gateway
+
+Run `20261126T111043719954Z` evaluated the same four retrieval modes on 54
+labeled cases per mode, using `top_k=5`, the index above, and the judge disabled.
+This full benchmark used `llm-critic-v2`, before the critic's evidence
+requirements were tightened. The Drive profile used `deepseek-v4.1-flash`
+through the Qianwen OpenAI-compatible gateway. The embedding and reranking
+models and the Tesla T4 environment matched the run above. The candidate
+dataset SHA-256 was
+`21ec517f4455a60faa3e8bf1c2219af3506a42976fec24acd51e960425382dd1`.
+The Drive profile SHA-256 was
+`240d3cae7deb282e4a9fa974e60c0895d916f5754c304f129c2c04e2cbcd8d16`.
+The six-file runtime patch used for this run had SHA-256
+`e62e88bc13fb310f1715d78ee9261fdbb64946d86ef9bdba590ac7f0b29745e8`.
+[Candidate benchmark report](reports/benchmarks/20261126T111043719954Z_live_golden_bench.md).
+
+| Metric | `dense_only` | `bm25_only` | `hybrid_rrf` | `hybrid_rerank` |
+|---|---:|---:|---:|---:|
+| Gold-evidence cases reaching retrieval | 46/46 | 46/46 | 46/46 | 46/46 |
+| Recall@5 | 0.9891 | 0.9928 | 0.9928 | 1.0000 |
+| MRR@5 | 0.9366 | 0.9674 | 1.0000 | 0.9457 |
+| NDCG@5 | 0.9423 | 0.9577 | 0.9820 | 0.9545 |
+| Citation coverage | 0.9891 | 1.0000 | 1.0000 | 1.0000 |
+| Citation validity | 1.0000 | 1.0000 | 1.0000 | 1.0000 |
+| Routing accuracy | 1.0000 | 0.9630 | 1.0000 | 0.9630 |
+| Tool accuracy | 1.0000 | 1.0000 | 1.0000 | 1.0000 |
+| Abstention accuracy | 0.9815 | 0.9815 | 1.0000 | 1.0000 |
+| Status accuracy | 0.9815 | 0.9815 | 1.0000 | 1.0000 |
+| P50 latency (ms) | 7,847.34 | 7,530.94 | 6,806.97 | 7,393.68 |
+| P95 latency (ms) | 23,478.55 | 17,731.85 | 15,908.14 | 20,508.56 |
+
+All 186 answered results passed the citation ID and metadata check. Semantic
+faithfulness was unmeasured. A companion Colab `.telemetry.json` file recorded
+674 schema-valid policy calls, zero schema rejections and zero route retries.
+The four mode runs took 30.8 minutes in total. The rewritten `bench-19` was
+answered in all four modes. Dense-only and BM25-only both answered `bench-47`,
+which expects `insufficient_evidence` because the corpus lacks the authorized
+MX-200 terminal torque. The archived report preserves status and citation IDs,
+so the exact answer text is unknown. BM25-only and Hybrid Rerank also mapped
+`bench-10` and `bench-26` to `parameter_lookup`.
+
+The candidate changed the routing policy, LLM, gateway, and `bench-19`
+wording. Isolating the routing policy's effect requires a paired run on
+the unchanged cases with the same model and gateway.
+
+#### Targeted follow-up
+
+Follow-up run `20261126T114134427256Z` used the tightened critic and cache policy
+`llm-critic-v3` on the same Qianwen model and index. The SHA-256 of
+`src/agents/policy.py` used in this run was
+`6d3a1e004c3c9289df14d90a17c5ac32723a5741aff8a0537b291179da1bf3cf`.
+The raw `abstention`, `paired_routes`, and `judge_smoke` JSON reports are
+archived locally in the Git-ignored `reports/generated/` directory.
+
+`bench-47`, `bench-48`, and `bench-52` each returned `insufficient_evidence`
+in all four retrieval modes across two runs per mode (24/24).
+The eight `bench-47` responses reported the missing torque
+specification and provided no torque value.
+
+On the 53 unchanged benchmark cases, the legacy and candidate router prompts
+scored 42/53 and 52/53, respectively, using the same model and gateway and
+one policy-layer attempt per prompt. Both were correct on 42 cases, only the
+candidate was correct on 10, and both missed `bench-26`. This comparison
+measures first-pass routing on these cases.
+
+In a separate `hybrid_rrf` smoke, all 15 final statuses matched the reference.
+The same model scored the 12 answered cases, with mean faithfulness of 0.9917
+and no judge errors. Abstentions and out-of-scope cases received no score.
+The validation of `llm-critic-v3` covers these targeted runs. The full 54 × 4
+benchmark for `llm-critic-v3` remains pending.
+
 `python scripts/verify_e2e.py` is the offline Antigravity entry point. It
 uses temporary index, cache and report paths and exercises ingestion, the
 manifest, the FastAPI request paths and all four Mock evaluation modes.

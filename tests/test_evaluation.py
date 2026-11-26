@@ -16,7 +16,7 @@ from src.core.llm import ChatMessage, MockLLMClient
 from src.core.settings import load_settings
 from src.evaluation.dataset import EvalCase, load_dataset
 from src.evaluation.metrics import score_case, score_ranking, summarize
-from src.evaluation.report import write_reports
+from src.evaluation.report import render_markdown, write_reports
 from src.evaluation.runner import (
     EvaluationReport,
     _RecordingRetriever,
@@ -149,6 +149,29 @@ def test_scoring_rejects_extra_and_reused_findings() -> None:
     )
 
 
+def test_retrieval_attempt_denominator_counts_empty_searches_and_preserves_legacy_unknown() -> None:
+    dataset = load_dataset(ROOT / "data" / "eval" / "golden_smoke.jsonl")
+    answerable = dataset.cases[0]
+    unanswerable = next(case for case in dataset.cases if case.category == "unanswerable")
+    result = DiagnosticResult(status="insufficient_evidence", intent=None, answer="fixture")
+    routed = result.model_copy(update={"intent": "fault_diagnosis"})
+    skipped = score_case(answerable, result, None, (), k=5, latency_ms=1)
+    attempted = score_case(answerable, routed, (), (), k=5, latency_ms=1)
+    without_gold = score_case(unanswerable, routed, (), (), k=5, latency_ms=1)
+
+    assert skipped.retrieval_attempted is False
+    assert attempted.retrieval_attempted is True and attempted.retrieved_ids == ()
+    assert without_gold.retrieval_attempted is True and without_gold.ranking is None
+    metrics = summarize([skipped, attempted, without_gold])
+    assert metrics.retrieval_samples == 2 and metrics.retrieval_attempted_samples == 1
+    assert metrics.recall_at_k == 0.0
+
+    legacy = attempted.model_dump(exclude={"retrieval_attempted"})
+    restored = type(attempted).model_validate(legacy)
+    assert restored.retrieval_attempted is None
+    assert summarize([skipped, restored]).retrieval_attempted_samples is None
+
+
 def test_recording_retriever_clears_evidence_on_failed_attempt() -> None:
     settings = load_settings(project_root=ROOT, env_file=None)
     chunk = read_corpus(settings.paths.corpus_dir, settings.ingestion).chunks[0]
@@ -223,6 +246,15 @@ def test_evaluation_preserves_full_report_when_one_judge_call_fails(
     assert [mode.metrics.judge_samples for mode in reloaded.modes] == [1, 2, 2, 2]
     assert reloaded.modes[0].cases[0].faithfulness is None
     assert all(mode.metrics.faithfulness == pytest.approx(0.9) for mode in reloaded.modes)
+    assert all(mode.metrics.retrieval_attempted_samples == 2 for mode in reloaded.modes)
+    assert "| Retrieval attempts (gold cases) | 2 | 2 | 2 | 2 |" in render_markdown(reloaded)
+    legacy = reloaded.model_dump()
+    for mode in legacy["modes"]:
+        del mode["metrics"]["retrieval_attempted_samples"]
+        for case in mode["cases"]:
+            del case["retrieval_attempted"]
+    restored = EvaluationReport.model_validate(legacy)
+    assert "Retrieval attempts (gold cases)" not in render_markdown(restored)
     assert [mode for mode, _, _ in progress] == [mode.mode for mode in reloaded.modes]
     assert all(count == 2 and elapsed >= 0.0 for _, count, elapsed in progress)
     failures = [record for record in caplog.records if record.message == "evaluation.judge_failed"]

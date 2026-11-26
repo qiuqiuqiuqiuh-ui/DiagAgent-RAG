@@ -182,7 +182,7 @@ def evaluate(
                     score_case(
                         case,
                         answer,
-                        capture.first or (),
+                        capture.first,
                         capture.last,
                         k=top_k,
                         latency_ms=latency_ms,

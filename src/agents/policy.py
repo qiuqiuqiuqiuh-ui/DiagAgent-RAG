@@ -170,6 +170,10 @@ class _SynthesisResponse(BaseModel):
     answer: NonBlank
 
 
+class _DiagnosticSchemaError(ModelClientError):
+    """The generated text failed validation against the diagnostic schema."""
+
+
 class LLMDiagnosticPolicy:
     def __init__(self, client: BaseLLMClient, domain: DomainSettings) -> None:
         self._client = client
@@ -192,15 +196,27 @@ class LLMDiagnosticPolicy:
         try:
             return parse_model_json(result.text, schema)
         except ValidationError:
-            raise ModelClientError(f"Invalid {schema.__name__} from the diagnostic model") from None
+            raise _DiagnosticSchemaError(
+                f"Invalid {schema.__name__} from the diagnostic model"
+            ) from None
 
     def route(self, request: DiagnosticRequest) -> Intent:
-        return self._complete(
-            'Classify the request as {"intent":"fault_diagnosis"}, {"intent":"parameter_lookup"}, '
-            'or {"intent":"out_of_scope"}. Use out_of_scope for requests unrelated to the domain.',
-            request.model_dump_json(),
-            _IntentResponse,
-        ).intent
+        instructions = (
+            'Classify the request. Return one JSON object with only the "intent" key, '
+            'for example {"intent":"fault_diagnosis"}. '
+            "Use fault_diagnosis for fault or alarm interpretation, troubleshooting, "
+            "maintenance checks, and deciding which observations or readings to record. "
+            "Use parameter_lookup for specifications, model suffixes, thresholds, limits, "
+            "or classifying one reading by a documented rule. "
+            "Treat questions about equipment, fault codes, sensors, and maintenance manuals "
+            "within the configured domain as in scope. Use out_of_scope only for an unrelated "
+            "request. Choose the intent that matches the main question."
+        )
+        payload = request.model_dump_json()
+        try:
+            return self._complete(instructions, payload, _IntentResponse).intent
+        except _DiagnosticSchemaError:
+            return self._complete(instructions, payload, _IntentResponse).intent
 
     def synthesize(self, context: EvidenceContext) -> str:
         return self._complete(
@@ -218,10 +234,15 @@ class LLMDiagnosticPolicy:
     ) -> CriticAssessment:
         return self._complete(
             'Return {"sufficient":true,"missing_aspects":[],"refined_query":null} '
-            "only if the draft answers the request and its factual claims follow from the cited "
-            "chunks and applicable "
-            "tool findings. Otherwise set sufficient to false, list what is missing, and supply "
-            "a focused search query when one is likely to find the missing evidence.",
+            "only if the draft directly answers the request and its factual claims follow from "
+            "the cited chunks and applicable tool findings. A requested value, limit, part number, "
+            "or procedure must be supported for the requested asset and conditions. "
+            "If the draft only states that the requested information is missing or refers the "
+            "user to a nameplate, an approved site procedure, an OEM specification, or another "
+            "source without providing the requested information, set sufficient to false. "
+            "A citation to general guidance does not support a specific value or instruction. "
+            "When sufficient is false, list the required information in missing_aspects and "
+            "supply a focused search query when one is likely to find the missing evidence.",
             json.dumps(
                 {
                     "context": context.model_dump(mode="json"),

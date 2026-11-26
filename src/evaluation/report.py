@@ -31,6 +31,13 @@ def render_markdown(report: EvaluationReport) -> str:
         "| Metric | " + " | ".join(mode.mode for mode in report.modes) + " |",
         "|---|" + "---:|" * len(report.modes),
     ]
+    attempts = [mode.metrics.retrieval_attempted_samples for mode in report.modes]
+    if any(count is not None for count in attempts):
+        lines.append(
+            "| Retrieval attempts (gold cases) | "
+            + " | ".join("—" if count is None else str(count) for count in attempts)
+            + " |"
+        )
     for label, name in _METRICS:
         values = (getattr(mode.metrics, name) for mode in report.modes)
         lines.append(

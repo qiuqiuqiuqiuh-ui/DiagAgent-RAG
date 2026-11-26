@@ -12,7 +12,7 @@ from src.agents.schemas import DiagnosticRequest, DiagnosticResult, FaultCodeFin
 from src.agents.tools import DiagnosticTools
 from src.agents.workflow import DiagnosticWorkflow, create_diagnostic_workflow
 from src.core.embedding import create_embedding_client
-from src.core.exceptions import ConfigurationError
+from src.core.exceptions import ConfigurationError, ModelClientError
 from src.core.llm import ChatMessage, MockLLMClient
 from src.core.reranker import create_reranker
 from src.core.settings import DomainSettings, IngestionSettings, Settings, load_settings
@@ -256,14 +256,115 @@ def test_untrusted_citations_are_rejected_even_with_valid_citations_present(chun
     assert len(retriever.calls) == 3
 
 
-def test_invalid_model_routing_fails_closed_without_retrieval() -> None:
+@pytest.mark.parametrize("invalid", ["{", '{"intent":"maintenance_record"}'])
+def test_live_router_retries_bad_json_or_intent(chunk: Chunk, invalid: str) -> None:
+    outputs = iter(
+        (
+            invalid,
+            '{"intent":"fault_diagnosis"}',
+            json.dumps({"answer": f"The trip indicates overcurrent. [{chunk.chunk_id}]"}),
+            '{"sufficient":true,"missing_aspects":[]}',
+        )
+    )
+    messages_by_call: list[list[ChatMessage]] = []
+
+    def respond(messages: Sequence[ChatMessage]) -> str:
+        messages_by_call.append(list(messages))
+        return next(outputs)
+
+    request = DiagnosticRequest(query="What readings should I record after VFD-OC3?")
+    retriever = RecordingRetriever([chunk])
+    result = DiagnosticWorkflow(
+        retriever, DiagnosticTools(), LLMDiagnosticPolicy(MockLLMClient(responder=respond), DOMAIN)
+    ).invoke(request)
+    assert result.status == "answered" and result.intent == "fault_diagnosis"
+    assert len(messages_by_call) == 4 and messages_by_call[0] == messages_by_call[1]
+    assert retriever.calls == [(request.query, 5, True)]
+    assert result.trace is not None and result.trace.retry_count == 0
+    assert tuple(step.node for step in result.trace.nodes) == NODES
+    router_prompt, router_input = messages_by_call[0]
+    assert router_prompt.role == "system" and router_input.role == "user"
+    assert json.loads(router_input.content) == request.model_dump(mode="json")
+    assert "observations or readings to record" in router_prompt.content
+    assert "classifying one reading" in router_prompt.content
+    assert "within the configured domain as in scope" in router_prompt.content
+    assert "Use out_of_scope only for an unrelated" in router_prompt.content
+
+
+@pytest.mark.parametrize(
+    "draft",
+    [
+        "The cited manual does not specify the torque. Consult the approved site procedure.",
+        "Use the authorized torque listed in the OEM specification.",
+        "The authorized terminal screw torque is 12 N m.",
+    ],
+)
+def test_live_critic_rejects_a_draft_without_evidence_of_requested_value(draft: str) -> None:
+    (evidence,) = chunk_sections(
+        "motor.md",
+        [Section(title="MX-200", text="The nameplate and approved site procedure govern service.")],
+        IngestionSettings(chunk_size=100, chunk_overlap=0),
+    )
+    missing = "The authorized MX-200 terminal screw torque"
+    answer = f"{draft} [{evidence.chunk_id}]"
+    critic_calls = 0
+
+    def respond(messages: Sequence[ChatMessage]) -> str:
+        nonlocal critic_calls
+        prompt = messages[0].content
+        if "Classify the request" in prompt:
+            return '{"intent":"parameter_lookup"}'
+        if "Draft a concise" in prompt:
+            return json.dumps({"answer": answer})
+        critic_calls += 1
+        assert "must be supported for the requested asset and conditions" in prompt
+        assert "only states that the requested information is missing or refers the user" in prompt
+        assert "without providing the requested information, set sufficient to false" in prompt
+        assert "list the required information in missing_aspects" in prompt
+        assert json.loads(messages[1].content)["answer"] == answer
+        return json.dumps({"sufficient": False, "missing_aspects": [missing]})
+
+    workflow = DiagnosticWorkflow(
+        RecordingRetriever([evidence]),
+        DiagnosticTools(),
+        LLMDiagnosticPolicy(MockLLMClient(responder=respond), DOMAIN),
+    )
+    request = DiagnosticRequest(
+        query="What is the authorized torque in N m for MX-200 terminal screws?",
+        equipment_id="MX-200",
+    )
+    result = workflow.invoke(request)
+
+    assert result.status == "insufficient_evidence" and result.intent == "parameter_lookup"
+    assert result.missing_aspects == (missing,) and result.citations == ()
+    assert draft not in result.answer
+    assert result.trace is not None and result.trace.retry_count == 2
+    assert critic_calls == 3
+
+
+@pytest.mark.parametrize(("provider_error", "attempts"), [(False, 2), (True, 1)])
+def test_invalid_model_routing_fails_closed_without_retrieval(
+    provider_error: bool, attempts: int
+) -> None:
+    calls = 0
+
+    def respond(messages: Sequence[ChatMessage]) -> str:
+        nonlocal calls
+        assert "Classify the request" in messages[0].content
+        calls += 1
+        if provider_error:
+            raise ModelClientError("provider rejected the credentials", status_code=401)
+        return '{"intent":"unknown"}'
+
     retriever = RecordingRetriever()
     result = DiagnosticWorkflow(
-        retriever, DiagnosticTools(), LLMDiagnosticPolicy(MockLLMClient(), DOMAIN)
+        retriever, DiagnosticTools(), LLMDiagnosticPolicy(MockLLMClient(responder=respond), DOMAIN)
     ).invoke(DiagnosticRequest(query="Diagnose VFD-OC3"))
     assert isinstance(result, DiagnosticResult)
     assert result.status == "insufficient_evidence" and result.intent is None
-    assert retriever.calls == []
+    assert retriever.calls == [] and calls == attempts
+    assert result.trace is not None
+    assert [step.node for step in result.trace.nodes] == ["intent_router"]
 
 
 @pytest.mark.parametrize("equipment", [None, "CV-40"])

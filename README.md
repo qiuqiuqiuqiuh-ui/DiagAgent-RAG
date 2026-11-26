@@ -208,12 +208,73 @@ matching cell script is
 can opt into JSON mode with `llm.json_mode` and choose the token-limit
 parameter their endpoint supports.
 
-| Retrieval mode | Real Colab GPU results |
-|---|---|
-| Dense only | TBD (run Colab benchmark) |
-| BM25 only | TBD (run Colab benchmark) |
-| Hybrid RRF | TBD (run Colab benchmark) |
-| Hybrid with reranking | TBD (run Colab benchmark) |
+### Live Colab benchmark
+
+The 2026-11-26 run evaluated all 54 cases in `golden_bench.jsonl` in each of
+the four retrieval modes (216 diagnoses). It reused the index verified in the
+15-case live smoke run, used `top_k=5`, and ran with the LLM judge disabled.
+[Full benchmark report](reports/benchmarks/20261126T082538306476Z_live_golden_bench.md).
+
+- Code commit `3710eab2e151da04db2e330e5d6b7ddc30ec707f`.
+- Dataset SHA-256 `20e01b827fd435385b88d65d6311b333b305747a57562c875745ffc57e8ec43e`.
+- Index version `v1-97aeb4683258e0a6fab3889fa493b39a323760ba1bf333f67032f6632ad293ea`.
+- The Drive copy of `configs/colab.yaml` used `https://api.deepseek.com`
+  with `deepseek-flash`, `temperature=0`, and `json_mode=true`. Its SHA-256
+  was `43e99db74c5e15ab628135e480572c18005561bb37bd807f76956c51d82511b7`.
+- Embedding used `sentence-transformers/all-MiniLM-L6-v2` (384 dimensions).
+  Reranking used `cross-encoder/ms-marco-MiniLM-L6-v2`. Both ran on a Tesla T4
+  with 15 GiB VRAM, CUDA 13.2, Python 3.11.18, PyTorch `2.15.0+cu132`,
+  sentence-transformers 5.7.0, and transformers 5.24.1. The index used
+  faiss-cpu 1.12.0.
+
+| Metric | `dense_only` | `bm25_only` | `hybrid_rrf` | `hybrid_rerank` |
+|---|---:|---:|---:|---:|
+| Recall@5 | 0.9022 | 0.9493 | 0.9710 | 0.9783 |
+| MRR@5 | 0.8605 | 0.9239 | 0.9783 | 0.9239 |
+| NDCG@5 | 0.8636 | 0.9142 | 0.9602 | 0.9328 |
+| Citation coverage | 0.8804 | 0.9130 | 0.9565 | 0.9565 |
+| Citation validity | 1.0000 | 1.0000 | 1.0000 | 1.0000 |
+| Routing accuracy | 0.7593 | 0.7222 | 0.7222 | 0.7963 |
+| Tool accuracy | 0.9032 | 1.0000 | 1.0000 | 1.0000 |
+| Abstention accuracy | 0.9074 | 0.9259 | 0.9630 | 0.9630 |
+| Status accuracy | 0.9074 | 0.9259 | 0.9630 | 0.9630 |
+| P50 latency (ms) | 8,135.82 | 7,450.93 | 8,668.94 | 8,119.53 |
+| P95 latency (ms) | 21,605.59 | 22,700.93 | 23,553.68 | 22,953.43 |
+
+The table reports end-to-end behavior. The live router ran independently in
+each mode. Five invalid intent responses and three `out_of_scope` decisions on
+the in-domain case `bench-23` stopped the workflow before retrieval and tools.
+These decisions account for most of the dense-only Recall@5 gap and all three
+of its tool misses. Dense-only tool accuracy was 28/31 end to end and 28/28 on
+cases that reached tool execution.
+
+The first-pass comparison below uses the **same 41 gold-evidence cases** that
+reached retrieval and returned candidates in every mode. It describes that
+shared subset of this run.
+
+| First-pass metric (41 shared cases) | `dense_only` | `bm25_only` | `hybrid_rrf` | `hybrid_rerank` |
+|---|---:|---:|---:|---:|
+| Recall@5 | 0.9878 | 0.9919 | 0.9919 | 1.0000 |
+| MRR@5 | 0.9411 | 0.9634 | 1.0000 | 0.9390 |
+| NDCG@5 | 0.9445 | 0.9534 | 0.9825 | 0.9503 |
+
+`hybrid_rrf` ranked the first gold result highest on average, and
+`hybrid_rerank` recovered all gold chunks on the shared subset, including the
+chunk that RRF missed on the first pass of `bench-22`. Both matched the
+expected final status in 52 of 54 cases. All 171 answered results passed the
+citation ID check. The optional judge was disabled.
+
+The Colab cell log recorded 678 policy-layer LLM calls and six schema
+failures (five intent and one critic). The standard JSON report records the
+five missing intents. The call count and critic failure come from the cell
+log. All four modes returned `insufficient_evidence` for `bench-19`, whose
+original label was `answered`. The cited manual lists observations to collect
+and describes similar indications from several causes, while the question
+asks how to distinguish two of those causes.
+
+The four mode runs took 35.3 minutes in total. The latency rows measure the
+full diagnosis workflow, including remote calls to `deepseek-flash`. The
+connectivity probe returned reasoning output.
 
 `python scripts/verify_e2e.py` is the offline Antigravity entry point. It
 uses temporary index, cache and report paths and exercises ingestion, the

@@ -496,3 +496,51 @@ def test_mock_policy_matches_sensor_alias_and_numeric_asset_label() -> None:
     policy = MockDiagnosticPolicy(DOMAIN)
     answer = policy.synthesize(context)
     assert policy.critique(context, answer, validate_citations(answer, chunks)).sufficient
+
+
+def test_citation_binding_accepts_all_canonical_sensor_units(chunk: Chunk) -> None:
+    for unit in ("℃", "MPa", "kPa", "Pa", "mm/s", "%", "degF", "K"):
+        answer, citations = bind_citations(f"Reading 10 [{unit}] [{chunk.chunk_id}].", [chunk])
+        assert answer == f"Reading 10 ({unit}) [{chunk.chunk_id}]."
+        assert len(citations) == 1
+    with pytest.raises(CitationError):
+        bind_citations(f"Reading [unknown-chunk-id] [{chunk.chunk_id}].", [chunk])
+
+
+def test_zh_workflow_localizes_refusal_out_of_scope_and_retry_suffix(chunk: Chunk) -> None:
+    zh_domain = DomainSettings(name="工业设备故障诊断", language="zh")
+    scope_retriever = RecordingRetriever([chunk])
+    scope_workflow = DiagnosticWorkflow(
+        scope_retriever,
+        DiagnosticTools(),
+        LLMDiagnosticPolicy(
+            MockLLMClient(responder=lambda _: '{"intent":"out_of_scope"}'), zh_domain
+        ),
+        language=zh_domain.language,
+    )
+    out_of_scope = scope_workflow.invoke(DiagnosticRequest(query="明天天气怎么样？"))
+    assert out_of_scope.status == "out_of_scope"
+    assert "维护领域" in out_of_scope.answer
+
+    def refuse_responder(messages: Sequence[ChatMessage]) -> str:
+        prompt = messages[0].content
+        if "Classify the request" in prompt:
+            return '{"intent":"parameter_lookup"}'
+        if "Draft a concise" in prompt:
+            return json.dumps({"answer": f"资料未记录该力矩。 [{chunk.chunk_id}]"})
+        return '{"sufficient":false,"missing_aspects":["螺栓力矩规格"]}'
+
+    retry_retriever = RecordingRetriever([chunk])
+    refuse_workflow = DiagnosticWorkflow(
+        retry_retriever,
+        DiagnosticTools(),
+        LLMDiagnosticPolicy(MockLLMClient(responder=refuse_responder), zh_domain),
+        language=zh_domain.language,
+    )
+    abstained = refuse_workflow.invoke(DiagnosticRequest(query="MX-200 安装螺栓力矩是多少？"))
+    assert abstained.status == "insufficient_evidence"
+    assert "现有证据不足" in abstained.answer
+    assert abstained.escalation_recommendation and "维护人员" in abstained.escalation_recommendation
+    assert len(retry_retriever.calls) == 3
+    assert "维护手册" in retry_retriever.calls[1][0]
+    assert "maintenance manual" not in retry_retriever.calls[1][0]

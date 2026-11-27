@@ -51,8 +51,13 @@ h3 { font-size: 1rem; }
 .status-dot[data-status="error"]::before { background: #ff8ba1; }
 .version { border: 1px solid #647a98; border-radius: .4rem; background: transparent; color: inherit; font-family: ui-monospace, Consolas, monospace; font-size: .75rem; padding: .24rem .42rem; white-space: nowrap; }
 .version:hover { border-color: #e0edff; }
+.topbar-actions { display: flex; align-items: center; gap: .5rem; }
 .topbar .secondary { background: #284266; border-color: #4c6b91; color: #f1f6ff; }
 .topbar .secondary:hover:not(:disabled) { background: #365480; }
+.auth-panel { margin-bottom: 1.15rem; }
+.auth-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)) auto; gap: .75rem; align-items: end; margin-top: .85rem; }
+.auth-actions { display: flex; gap: .45rem; }
+.auth-actions .primary { width: auto; }
 
 .workspace { padding-block: 2.4rem 3rem; }
 .page-heading { margin-bottom: 1.6rem; }
@@ -138,7 +143,8 @@ dd { margin: 0; overflow-wrap: anywhere; }
   .shell { width: calc(100% - 1.5rem); }
   .topbar-inner { flex-wrap: wrap; gap: .55rem .8rem; }
   .system-status { order: 2; width: 100%; margin-left: 0; }
-  .topbar .secondary { margin-left: auto; }
+  .topbar-actions { margin-left: auto; }
+  .auth-form { grid-template-columns: minmax(0, 1fr); }
   .workspace { padding-top: 1.65rem; }
   .panel { padding: .9rem; }
   .elapsed { margin-left: 0; }

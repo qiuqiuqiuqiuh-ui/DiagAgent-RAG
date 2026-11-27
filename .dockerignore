@@ -7,5 +7,6 @@
 !scripts/*.py
 !configs/
 !configs/production.yaml
+!configs/production_bilingual.yaml
 **/__pycache__/
 **/*.pyc

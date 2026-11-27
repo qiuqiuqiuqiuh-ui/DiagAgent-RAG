@@ -103,6 +103,7 @@ class ApiSettings(ProfileSection):
     max_sensor_readings: int = Field(default=64, ge=0)
     rate_limit_rpm: int | None = Field(default=None, gt=0)
     enable_metrics: bool = False
+    enable_demo_ui: bool = True
 
     @field_validator("api_key", "admin_api_key", mode="before")
     @classmethod

@@ -26,7 +26,7 @@ from src.core.reranker import BaseReranker
 from src.core.settings import Settings
 from src.ingestion.corpus import read_corpus
 from src.ingestion.pipeline import build_index
-from src.ingestion.schemas import Chunk
+from src.ingestion.schemas import Chunk, document_id
 from src.retrieval.hybrid import HybridRetriever
 from src.retrieval.index import IndexManifest, load_index, prune_generations
 
@@ -140,6 +140,9 @@ class DiagnosticService:
                 "Build a compatible index with POST /v1/ingest before viewing evidence."
             )
         chunk = snapshot.chunks_by_id.get(chunk_id)
+        if chunk is None and "#" in chunk_id:
+            doc_part, fragment = chunk_id.split("#", 1)
+            chunk = snapshot.chunks_by_id.get(f"{document_id(doc_part)}#{fragment}")
         return ChunkDetailResponse.model_validate(chunk, from_attributes=True) if chunk else None
 
     def ingest(self) -> IndexManifest:

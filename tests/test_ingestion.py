@@ -360,3 +360,20 @@ def test_invalid_source_path_raises_corpus_error() -> None:
             [Section(title="Manual", text="details")],
             IngestionSettings(chunk_size=100, chunk_overlap=0),
         )
+
+
+def test_cjk_chunking_prefers_sentence_punctuation_without_spaces() -> None:
+    paragraph = (
+        "首先核对变频器加速斜坡时间与当前输出电流曲线。"
+        "若反复触发过流保护，则进一步检查电机绝缘与负载阻力；"
+        "记录同工况下的连续复测数据！"
+        "必要时通知电气维护团队？"
+    )
+    chunks = chunk_sections(
+        "manuals/zh_drive.md",
+        [Section(title="故障排查", text=paragraph)],
+        IngestionSettings(chunk_size=30, chunk_overlap=0),
+    )
+    assert len(chunks) >= 3
+    assert chunks[0].text.endswith("。")
+    assert chunks[1].text.endswith("；")

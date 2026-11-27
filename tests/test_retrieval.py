@@ -355,3 +355,18 @@ def test_rejects_wrong_faiss_type_before_overwriting_manifest(
             root, wrong, stored.chunks, manifest.corpus_hash, settings.embedding, settings.ingestion
         )
     assert (root / "manifest.json").read_bytes() == before
+
+
+def test_mock_embedding_separates_cjk_terms_for_semantic_similarity() -> None:
+    embedder = MockEmbeddingClient(dimension=384)
+    vectors = embedder.embed(
+        [
+            "变频器加速过流如何排查",
+            "驱动器在启动加速阶段出现过流保护时的电流排查步骤",
+            "离心泵机械密封冷却水流量偏低",
+        ]
+    )
+    relevant_similarity = float(vectors[0] @ vectors[1])
+    unrelated_similarity = float(vectors[0] @ vectors[2])
+    assert relevant_similarity > unrelated_similarity
+    assert relevant_similarity > 0.2

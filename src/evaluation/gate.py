@@ -58,7 +58,11 @@ def _faithfulness(
 
 
 def check_eval_gate(
-    report: EvaluationReport, mode_name: Mode, *, replay: GateReplayReport | None = None
+    report: EvaluationReport,
+    mode_name: Mode,
+    *,
+    replay: GateReplayReport | None = None,
+    allow_no_tools: bool = False,
 ) -> dict:
     selected = [mode for mode in report.modes if mode.mode == mode_name]
     if len(selected) != 1:
@@ -93,6 +97,14 @@ def check_eval_gate(
             "minimum": threshold,
             "samples": samples,
             "passed": meets_threshold and samples > 0,
+        }
+    if allow_no_tools and metrics.tool_samples == 0:
+        results["tool_accuracy"] = {
+            "value": None,
+            "minimum": 1.0,
+            "samples": 0,
+            "skipped": True,
+            "passed": True,
         }
     faith = results["faithfulness"]
     faith["required_samples"] = answered_samples

@@ -17,6 +17,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--report", type=Path, required=True, help="JSON from scripts/evaluate.py")
     parser.add_argument("--mode", choices=get_args(Mode), default="hybrid_rerank")
     parser.add_argument("--replay", type=Path, help="matching JSON from scripts/replay_judge.py")
+    parser.add_argument(
+        "--allow-no-tools",
+        action="store_true",
+        help="allow manual-only corpora with zero tool-annotated cases",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -24,7 +29,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         replay = (
             GateReplayReport.model_validate_json(args.replay.read_bytes()) if args.replay else None
         )
-        result = check_eval_gate(report, args.mode, replay=replay)
+        result = check_eval_gate(
+            report, args.mode, replay=replay, allow_no_tools=args.allow_no_tools
+        )
     except ValidationError:
         result = {"status": "FAIL", "error": "Invalid evaluation or replay report structure"}
     except (DiagAgentError, OSError) as exc:

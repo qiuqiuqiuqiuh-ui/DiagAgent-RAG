@@ -2,11 +2,11 @@ import re
 from collections.abc import Sequence
 
 from src.agents.schemas import Citation
+from src.agents.tools import KNOWN_SENSOR_UNITS
 from src.core.exceptions import DiagAgentError
 from src.ingestion.schemas import Chunk
 
 _MARKER = re.compile(r"\[([^\[\]\r\n]+)\]")
-_UNITS = frozenset({"degc", "°c", "°f", "bar", "psi", "mm/s rms", "l/min", "hz", "rpm", "a", "v"})
 
 
 class CitationError(DiagAgentError):
@@ -20,7 +20,7 @@ def bind_citations(answer: str, context: Sequence[Chunk]) -> tuple[str, tuple[Ci
 
     def bind(match: re.Match[str]) -> str:
         label = match[1].strip()
-        if label.casefold() in _UNITS:
+        if label.casefold() in KNOWN_SENSOR_UNITS:
             return f"({label})"
         ids = [item.strip() for item in label.split(",")]
         if any(chunk_id not in by_id for chunk_id in ids):

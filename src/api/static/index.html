@@ -21,7 +21,10 @@
         <span id="chunk-count"></span>
         <button class="version" id="copy-version" type="button" hidden></button>
       </div>
-      <button class="button secondary" id="build-index" type="button">Build index</button>
+      <div class="topbar-actions">
+        <button class="button secondary" id="auth-toggle" type="button" hidden>API keys</button>
+        <button class="button secondary" id="build-index" type="button">Build index</button>
+      </div>
     </div>
   </header>
 
@@ -31,6 +34,27 @@
       <p id="domain">Industrial equipment fault diagnosis</p>
     </div>
     <p class="notice" id="system-notice" role="status" hidden></p>
+
+    <section class="panel auth-panel" id="auth-panel" aria-labelledby="auth-heading" hidden>
+      <div class="panel-heading">
+        <h2 id="auth-heading">API credentials</h2>
+        <p class="hint" id="auth-hint">Stored only for this browser tab session.</p>
+      </div>
+      <form class="auth-form" id="auth-form">
+        <div>
+          <label class="field" for="api-key">API key</label>
+          <input id="api-key" name="api_key" type="password" placeholder="Required for protected /v1 endpoints" autocomplete="off">
+        </div>
+        <div>
+          <label class="field" for="admin-key">Admin API key (optional)</label>
+          <input id="admin-key" name="admin_api_key" type="password" placeholder="Used for /v1/ingest when separate" autocomplete="off">
+        </div>
+        <div class="auth-actions">
+          <button class="button primary" id="apply-keys" type="submit">Apply keys</button>
+          <button class="button secondary" id="clear-keys" type="button">Clear</button>
+        </div>
+      </form>
+    </section>
 
     <div class="workspace-grid">
       <section class="panel request-panel" aria-labelledby="request-heading">
@@ -51,12 +75,12 @@
           <div class="field-pair">
             <div>
               <label class="field" for="equipment">Equipment ID</label>
-              <input id="equipment" name="equipment_id" list="equipment-options" placeholder="e.g. DRV-300" autocomplete="off">
+              <input id="equipment" name="equipment_id" list="equipment-options" placeholder="Optional equipment ID" autocomplete="off">
               <datalist id="equipment-options"></datalist>
             </div>
             <div>
               <label class="field" for="fault-code">Fault code</label>
-              <input id="fault-code" name="fault_code" list="fault-options" placeholder="e.g. VFD-OC3" autocomplete="off">
+              <input id="fault-code" name="fault_code" list="fault-options" placeholder="Optional fault code" autocomplete="off">
               <datalist id="fault-options"></datalist>
             </div>
           </div>

@@ -6,7 +6,7 @@ from time import perf_counter
 from typing import Annotated
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -104,11 +104,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             {"detail": "An internal server error occurred."}, status_code=500, headers=headers
         )
 
-    app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
+    if configured.api.enable_demo_ui:
+        app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 
-    @app.get("/", include_in_schema=False)
-    def demo() -> FileResponse:
-        return FileResponse(_STATIC_DIR / "index.html", media_type="text/html")
+        @app.get("/", include_in_schema=False)
+        def demo() -> FileResponse:
+            return FileResponse(_STATIC_DIR / "index.html", media_type="text/html")
 
     @app.get("/health", response_model=HealthResponse)
     def health(service: Service) -> HealthResponse:
@@ -139,8 +140,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def meta(service: Service) -> MetaResponse:
         return service.meta()
 
-    @app.get("/v1/chunks/{chunk_id:path}", response_model=ChunkDetailResponse)
-    def chunk_detail(chunk_id: str, service: Service) -> ChunkDetailResponse:
+    def _read_chunk(chunk_id: str, service: DiagnosticService) -> ChunkDetailResponse:
         try:
             chunk = service.chunk_detail(chunk_id)
         except IndexNotReady as exc:
@@ -148,6 +148,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if chunk is None:
             raise HTTPException(404, "The chunk is not in the active index.")
         return chunk
+
+    @app.get("/v1/chunks", response_model=ChunkDetailResponse)
+    def chunk_detail_query(
+        service: Service, chunk_id: str = Query(..., min_length=1)
+    ) -> ChunkDetailResponse:
+        return _read_chunk(chunk_id, service)
+
+    @app.get("/v1/chunks/{chunk_id:path}", response_model=ChunkDetailResponse)
+    def chunk_detail(chunk_id: str, service: Service) -> ChunkDetailResponse:
+        return _read_chunk(chunk_id, service)
 
     @app.post("/v1/ingest", response_model=IndexManifest)
     def ingest(service: Service) -> IndexManifest:

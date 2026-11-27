@@ -1,6 +1,7 @@
 import logging
 from collections.abc import Callable
 from contextlib import nullcontext
+from dataclasses import dataclass
 from time import perf_counter
 from typing import Literal, Protocol
 
@@ -40,8 +41,64 @@ from src.retrieval.schemas import SearchHit
 
 _LOGGER = logging.getLogger("diagagent.agents")
 _MAX_RETRIES = 2
-_ESCALATION = "Escalate to qualified maintenance with the equipment ID, event log, and readings."
-_MISSING_EVIDENCE = "Maintenance documentation that supports the requested diagnosis"
+
+
+@dataclass(frozen=True)
+class _WorkflowCopy:
+    abstention_answer: str
+    escalation: str
+    missing_evidence: str
+    out_of_scope_answer: str
+    missing_intent: str
+    retrieval_failed: str
+    synthesis_failed: str
+    critic_failed: str
+    retry_suffix: str
+    tool_fault_missing: str
+    tool_sensor_missing: str
+    sensor_critical_escalation: str
+
+
+_COPY: dict[str, _WorkflowCopy] = {
+    "en": _WorkflowCopy(
+        abstention_answer="The available evidence is insufficient for a grounded diagnosis.",
+        escalation=(
+            "Escalate to qualified maintenance with the equipment ID, event log, and readings."
+        ),
+        missing_evidence="Maintenance documentation that supports the requested diagnosis",
+        out_of_scope_answer="I can help with requests within the configured maintenance domain.",
+        missing_intent="A validated diagnostic intent",
+        retrieval_failed="A successful retrieval of relevant maintenance documentation",
+        synthesis_failed="A validated diagnosis from the synthesis model",
+        critic_failed="An independent review of the cited diagnosis",
+        retry_suffix="maintenance manual",
+        tool_fault_missing="Equipment and a documented mapping for fault code {fault_code}",
+        tool_sensor_missing="Equipment and a documented threshold for sensor {sensor}",
+        sensor_critical_escalation=(
+            "Escalate the critical {sensor} reading on {equipment_id} to qualified maintenance."
+        ),
+    ),
+    "zh": _WorkflowCopy(
+        abstention_answer="现有证据不足以给出有据可依的诊断结论。",
+        escalation="请携带设备编号、事件日志及现场读数升级交由专业维护人员处理。",
+        missing_evidence="能够支持当前诊断请求的维护文档证据",
+        out_of_scope_answer="我仅支持处理当前已配置维护领域内的设备诊断与运维请求。",
+        missing_intent="有效的诊断意图分类结果",
+        retrieval_failed="成功检索到相关的维护文档片段",
+        synthesis_failed="来自诊断生成模型的有效结构化回答",
+        critic_failed="对带引用诊断结论的独立复核结果",
+        retry_suffix="维护手册",
+        tool_fault_missing="设备编号以及故障码 {fault_code} 的已记录映射规则",
+        tool_sensor_missing="设备编号以及传感器 {sensor} 的已记录阈值规则",
+        sensor_critical_escalation=(
+            "请将设备 {equipment_id} 的 {sensor} 严重告警读数立即升级交由专业维护人员处理。"
+        ),
+    ),
+}
+
+
+def _copy_for(language: str) -> _WorkflowCopy:
+    return _COPY["zh"] if language.strip().casefold().startswith("zh") else _COPY["en"]
 
 
 class EvidenceRetriever(Protocol):
@@ -75,15 +132,16 @@ class DiagnosticState(DiagnosticInput, DiagnosticUpdate):
 def _abstention(
     intent: Intent | None,
     missing: tuple[str, ...],
+    copy: _WorkflowCopy,
     findings: tuple[ToolFinding, ...] = (),
 ) -> DiagnosticResult:
     return DiagnosticResult(
         status="insufficient_evidence",
         intent=intent,
-        answer="The available evidence is insufficient for a grounded diagnosis.",
+        answer=copy.abstention_answer,
         missing_aspects=missing,
         tool_findings=findings,
-        escalation_recommendation=_ESCALATION,
+        escalation_recommendation=copy.escalation,
     )
 
 
@@ -119,28 +177,27 @@ def _next_node(state: DiagnosticState) -> Literal["finish", "retrieve"]:
     return "finish" if "result" in state else "retrieve"
 
 
-def _tool_issues(findings: tuple[ToolFinding, ...]) -> tuple[str, ...]:
+def _tool_issues(findings: tuple[ToolFinding, ...], copy: _WorkflowCopy) -> tuple[str, ...]:
     missing: list[str] = []
     for finding in findings:
         if finding.status in ("unknown", "ambiguous"):
             if isinstance(finding, FaultCodeFinding):
-                missing.append(
-                    f"Equipment and a documented mapping for fault code {finding.fault_code}"
-                )
+                missing.append(copy.tool_fault_missing.format(fault_code=finding.fault_code))
             else:
-                missing.append(f"Equipment and a documented threshold for sensor {finding.sensor}")
+                missing.append(copy.tool_sensor_missing.format(sensor=finding.sensor))
     return tuple(missing)
 
 
-def _recommend_escalation(findings: tuple[ToolFinding, ...]) -> str | None:
+def _recommend_escalation(findings: tuple[ToolFinding, ...], copy: _WorkflowCopy) -> str | None:
     recommendations: list[str] = []
     for finding in findings:
         if isinstance(finding, FaultCodeFinding) and finding.status == "found" and finding.rule:
             recommendations.append(finding.rule.escalation.rstrip(".") + ".")
         elif isinstance(finding, SensorFinding) and finding.status == "critical" and finding.rule:
             recommendations.append(
-                f"Escalate the critical {finding.sensor} reading on {finding.rule.equipment_id} "
-                "to qualified maintenance."
+                copy.sensor_critical_escalation.format(
+                    sensor=finding.sensor, equipment_id=finding.rule.equipment_id
+                )
             )
     return " ".join(dict.fromkeys(recommendations)) or None
 
@@ -155,6 +212,7 @@ class DiagnosticWorkflow:
         policy: DiagnosticPolicy,
         *,
         initial_top_k: int = 5,
+        language: str = "en",
     ) -> None:
         if initial_top_k < 1:
             raise ValueError("initial_top_k must be positive")
@@ -162,6 +220,7 @@ class DiagnosticWorkflow:
         self._tools = tools
         self._policy = policy
         self._initial_top_k = initial_top_k
+        self._copy = _copy_for(language)
 
         graph = StateGraph(DiagnosticState, input_schema=DiagnosticInput)
         graph.add_node("intent_router", _observe("intent_router", self._route))
@@ -220,14 +279,14 @@ class DiagnosticWorkflow:
         try:
             intent = self._policy.route(state["request"])
         except ModelClientError:
-            return {"result": _abstention(None, ("A validated diagnostic intent",))}
+            return {"result": _abstention(None, (self._copy.missing_intent,), self._copy)}
         if intent == "out_of_scope":
             return {
                 "intent": intent,
                 "result": DiagnosticResult(
                     status="out_of_scope",
                     intent=intent,
-                    answer="I can help with requests within the configured maintenance domain.",
+                    answer=self._copy.out_of_scope_answer,
                 ),
             }
         return {"intent": intent}
@@ -248,12 +307,12 @@ class DiagnosticWorkflow:
             return {
                 "chunks": (),
                 "top_k": top_k,
-                "evidence_issue": "A successful retrieval of relevant maintenance documentation",
+                "evidence_issue": self._copy.retrieval_failed,
             }
         return {
             "chunks": tuple(hit.chunk for hit in hits),
             "top_k": top_k,
-            "evidence_issue": None if hits else _MISSING_EVIDENCE,
+            "evidence_issue": None if hits else self._copy.missing_evidence,
         }
 
     def _run_tools(self, state: DiagnosticState) -> DiagnosticUpdate:
@@ -270,13 +329,13 @@ class DiagnosticWorkflow:
         issue = state.get("evidence_issue")
         answer = ""
         citations: tuple[Citation, ...] = ()
-        if issue is None and not _tool_issues(context.tool_findings):
+        if issue is None and not _tool_issues(context.tool_findings, self._copy):
             try:
                 answer, citations = bind_citations(self._policy.synthesize(context), context.chunks)
             except CitationError as exc:
                 issue = str(exc)
             except ModelClientError:
-                issue = "A validated diagnosis from the synthesis model"
+                issue = self._copy.synthesis_failed
         return {
             "context": context,
             "answer": answer,
@@ -286,9 +345,13 @@ class DiagnosticWorkflow:
 
     def _critique(self, state: DiagnosticState) -> DiagnosticUpdate:
         context = state["context"]
-        tool_issues = _tool_issues(context.tool_findings)
+        tool_issues = _tool_issues(context.tool_findings, self._copy)
         if tool_issues:
-            return {"result": _abstention(context.intent, tool_issues, context.tool_findings)}
+            return {
+                "result": _abstention(
+                    context.intent, tool_issues, self._copy, context.tool_findings
+                )
+            }
         issue = state.get("evidence_issue")
         if issue:
             assessment = CriticAssessment(sufficient=False, missing_aspects=(issue,))
@@ -298,7 +361,7 @@ class DiagnosticWorkflow:
             except ModelClientError:
                 assessment = CriticAssessment(
                     sufficient=False,
-                    missing_aspects=("An independent review of the cited diagnosis",),
+                    missing_aspects=(self._copy.critic_failed,),
                 )
 
         if assessment.sufficient and not assessment.missing_aspects and state["citations"]:
@@ -309,15 +372,21 @@ class DiagnosticWorkflow:
                     answer=state["answer"],
                     citations=state["citations"],
                     tool_findings=context.tool_findings,
-                    escalation_recommendation=_recommend_escalation(context.tool_findings),
+                    escalation_recommendation=_recommend_escalation(
+                        context.tool_findings, self._copy
+                    ),
                 )
             }
 
-        missing = assessment.missing_aspects or (_MISSING_EVIDENCE,)
+        missing = assessment.missing_aspects or (self._copy.missing_evidence,)
         retry = state.get("retry_count", 0)
         if retry >= _MAX_RETRIES:
-            return {"result": _abstention(context.intent, missing, context.tool_findings)}
-        refinement = assessment.refined_query or f"{context.request.query} maintenance manual"
+            return {
+                "result": _abstention(context.intent, missing, self._copy, context.tool_findings)
+            }
+        refinement = (
+            assessment.refined_query or f"{context.request.query} {self._copy.retry_suffix}"
+        )
         return {
             "retry_count": retry + 1,
             "feedback": CriticAssessment(
@@ -353,4 +422,5 @@ def create_diagnostic_workflow(
         else DiagnosticTools.from_corpus(settings.paths.corpus_dir, settings.rules),
         policy,
         initial_top_k=initial_top_k,
+        language=settings.domain.language,
     )

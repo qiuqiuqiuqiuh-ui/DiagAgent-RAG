@@ -178,3 +178,47 @@ def test_gate_cli_reports_pass_and_rejects_invalid_report(
     path.write_text("invalid JSON", encoding="utf-8")
     assert cli(["--report", str(path)]) == 1
     assert json.loads(capsys.readouterr().out)["status"] == "FAIL"
+
+
+def test_gate_allow_no_tools_supports_manual_only_corpora_without_relaxing_measured_tools(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], report: EvaluationReport
+) -> None:
+    mode = report.modes[0]
+    manual_only_cases = tuple(
+        case.model_copy(update={"tools_correct": None}) for case in mode.cases
+    )
+    manual_only = report.model_copy(
+        update={
+            "modes": (
+                ModeReport(
+                    mode="hybrid_rerank",
+                    metrics=summarize(manual_only_cases),
+                    cases=manual_only_cases,
+                ),
+            )
+        }
+    )
+    assert check_eval_gate(manual_only, "hybrid_rerank")["status"] == "FAIL"
+    passed = check_eval_gate(manual_only, "hybrid_rerank", allow_no_tools=True)
+    assert passed["status"] == "PASS"
+    assert passed["checks"]["tool_accuracy"] == {
+        "value": None,
+        "minimum": 1.0,
+        "samples": 0,
+        "skipped": True,
+        "passed": True,
+    }
+
+    cli = run_path(str(ROOT / "scripts" / "check_eval_gate.py"))["main"]
+    path = tmp_path / "manual_only.json"
+    path.write_text(manual_only.model_dump_json(), encoding="utf-8")
+    assert cli(["--report", str(path)]) == 1
+    assert json.loads(capsys.readouterr().out)["status"] == "FAIL"
+    assert cli(["--report", str(path), "--allow-no-tools"]) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "PASS"
+
+    failing_tools = report.model_copy(deep=True)
+    failing_tools.modes[0].metrics = failing_tools.modes[0].metrics.model_copy(
+        update={"tool_accuracy": 0.5}
+    )
+    assert check_eval_gate(failing_tools, "hybrid_rerank", allow_no_tools=True)["status"] == "FAIL"

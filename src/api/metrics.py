@@ -26,7 +26,7 @@ class ApiMetrics:
     def observe_http(self, endpoint: str, status: int, elapsed: float) -> None:
         with self._lock:
             self._requests[endpoint, status] += 1
-            if endpoint == "/v1/diagnose":
+            if endpoint == "/v1/diagnose" and status == 200:
                 self._duration_buckets[bisect_left(_LATENCY_BOUNDS, elapsed)] += 1
                 self._duration_sum += elapsed
 

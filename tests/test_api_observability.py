@@ -100,8 +100,8 @@ def test_health_probes_and_opt_in_metrics_cover_request_and_workflow_outcomes(
             'diagagent_cache_requests_total{outcome="miss"} 2',
             'diagagent_cache_requests_total{outcome="bypass"} 1',
             'diagagent_workflow_retries_total{retries="2"} 1',
-            'diagagent_diagnose_duration_seconds_bucket{le="+Inf"} 5',
-            "diagagent_diagnose_duration_seconds_count 5",
+            'diagagent_diagnose_duration_seconds_bucket{le="+Inf"} 4',
+            "diagagent_diagnose_duration_seconds_count 4",
             "diagagent_index_ready 1",
             f"diagagent_index_chunks {manifest['chunk_count']}",
         } <= lines

@@ -146,3 +146,96 @@ def test_manual_only_corpus_requires_explicit_rule_opt_out(demo_settings: Settin
         assert any(
             citation["source_path"] == "manuals/vfd_faults.md" for citation in answer["citations"]
         )
+
+
+def test_chunk_lookup_handles_non_ascii_and_spaces_via_query_and_path(
+    demo_settings: Settings,
+) -> None:
+    manual = demo_settings.paths.corpus_dir / "manuals" / "变频器 手册.md"
+    manual.write_text("# 变频器手册\n\nVFD-CN9 加速过流说明。\n", encoding="utf-8")
+    with TestClient(create_app(demo_settings)) as client:
+        assert client.post("/v1/ingest").status_code == 200
+        diagnosis = client.post(
+            "/v1/diagnose",
+            json={"query": "VFD-CN9 加速过流说明", "equipment_id": "DRV-300"},
+        )
+        assert diagnosis.status_code == 200
+        result = diagnosis.json()
+        assert result["status"] == "answered"
+        target = next(
+            citation["chunk_id"]
+            for citation in result["citations"]
+            if citation["source_path"] == "manuals/变频器 手册.md"
+        )
+        for url in (
+            f"/v1/chunks?chunk_id={quote(target, safe='')}",
+            f"/v1/chunks/{quote(target, safe='')}",
+            f"/v1/chunks/{quote(target, safe='/')}",
+        ):
+            response = client.get(url)
+            assert response.status_code == 200
+            payload = response.json()
+            assert payload["chunk_id"] == target
+            assert payload["source_path"] == "manuals/变频器 手册.md"
+            assert "VFD-CN9" in payload["text"]
+        assert (
+            client.get(f"/v1/chunks?chunk_id={quote(f'../{target}', safe='')}").status_code == 404
+        )
+        assert client.get(f"/v1/chunks/%2e%2e%2f{quote(target, safe='')}").status_code == 404
+
+
+def test_demo_ui_assets_avoid_hardcoded_sample_equipment_and_support_custom_corpus(
+    tmp_path: Path,
+) -> None:
+    settings = load_settings(project_root=ROOT, env_file=None)
+    corpus = tmp_path / "custom_corpus"
+    (corpus / "manuals").mkdir(parents=True)
+    (corpus / "manuals" / "chiller.md").write_text(
+        "# CHL-09 Chiller\n\nALM-99 indicates condenser high pressure.\n", encoding="utf-8"
+    )
+    (corpus / "fault_codes.csv").write_text(
+        "fault_code,equipment_id,severity,meaning,first_check,escalation\n"
+        "ALM-99,CHL-09,trip,Condenser high pressure,Inspect cooling tower,HVAC maintenance\n",
+        encoding="utf-8",
+    )
+    (corpus / "sensor_thresholds.json").write_text(
+        '[{"equipment_id":"CHL-09","sensor":"discharge_pressure","unit":"MPa",'
+        '"warning_threshold":1.6,"critical_threshold":2.0,"direction":"high"}]',
+        encoding="utf-8",
+    )
+    settings.paths.corpus_dir = corpus
+    settings.paths.index_dir = tmp_path / "index"
+    settings.paths.cache_file = tmp_path / "cache.sqlite3"
+    with TestClient(create_app(settings)) as client:
+        html = client.get("/").text
+        script = client.get("/static/app.js").text
+        for sample_token in ("DRV-300", "VFD-OC3", "PM-14", "MX-200"):
+            assert sample_token not in html
+            assert sample_token not in script
+        assert client.post("/v1/ingest").status_code == 200
+        meta = client.get("/v1/meta").json()
+        assert meta["equipment_ids"] == ["CHL-09"]
+        assert meta["fault_codes"] == {"CHL-09": ["ALM-99"]}
+        assert meta["sensors"][0]["sensor"] == "discharge_pressure"
+
+
+def test_demo_ui_toggle_and_authenticated_access(demo_settings: Settings) -> None:
+    demo_settings.api.enable_demo_ui = False
+    with TestClient(create_app(demo_settings)) as client:
+        assert client.get("/").status_code == 404
+        assert client.get("/static/app.js").status_code == 404
+        assert client.get("/health").status_code == 200
+        assert client.get("/v1/meta").status_code == 200
+
+    demo_settings.api.enable_demo_ui = True
+    demo_settings.api.api_key = SecretStr("ui-test-key")
+    headers = {"X-API-Key": "ui-test-key"}
+    with TestClient(create_app(demo_settings)) as client:
+        assert client.get("/").status_code == 200
+        assert client.get("/health").status_code == 200
+        assert client.get("/v1/meta").status_code == 401
+        assert client.get("/v1/meta", headers=headers).status_code == 200
+        assert client.post("/v1/ingest", headers=headers).status_code == 200
+        query_url = f"/v1/chunks?chunk_id={quote(CHUNK_ID, safe='')}"
+        assert client.get(query_url).status_code == 401
+        assert client.get(query_url, headers=headers).status_code == 200

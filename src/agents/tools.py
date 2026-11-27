@@ -44,6 +44,7 @@ _SENSOR_UNITS = {
         "%",
     )
 } | {"°c": "degC", "℃": "degC", "celsius": "degC", "°f": "degF", "℉": "degF", "fahrenheit": "degF"}
+KNOWN_SENSOR_UNITS: frozenset[str] = frozenset(_SENSOR_UNITS)
 
 
 def canonical_sensor_unit(unit: str) -> str | None:

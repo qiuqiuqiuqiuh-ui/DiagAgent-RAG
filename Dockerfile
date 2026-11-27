@@ -28,7 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 && \
 WORKDIR /app
 COPY --from=build /opt/venv /opt/venv
 COPY scripts/ ./scripts/
-COPY configs/production.yaml ./configs/production.yaml
+COPY configs/production.yaml configs/production_bilingual.yaml ./configs/
 
 USER 10001:10001
 EXPOSE 8000

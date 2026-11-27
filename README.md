@@ -6,6 +6,9 @@ workflow indexes that corpus, retrieves evidence, and runs a typed diagnostic
 graph with offline Mock and OpenAI-compatible model policies. A FastAPI service
 exposes the workflow, and an evaluation runner compares four retrieval modes.
 
+To adapt this repository as a template for your own equipment fleet, corpus, or
+internal deployment, see [the customization guide](docs/CUSTOMIZATION.md).
+
 ## Target architecture
 
 ```mermaid
@@ -211,10 +214,13 @@ protected deployments. Clients can use `X-API-Key` or `Authorization: Bearer`.
 The regular key authorizes `/v1/diagnose`, `/v1/meta`, and `/v1/chunks/*`.
 The admin key authorizes ingestion and, when enabled, `/metrics`. The regular
 key also authorizes those administrative routes when an admin key is unset.
+Set `DIAGAGENT_API__ENABLE_DEMO_UI=false` to disable `/` and `/static` on API-only
+deployments, or enter session-scoped keys in the Demo UI when authentication is enabled.
 Set `DIAGAGENT_API__CORS_ALLOW_ORIGINS` to a JSON list of permitted browser
 origins if cross-origin calls are required. The rate limit is per peer and
 role, returns a `Retry-After` header on HTTP 429, and is configured through
-`DIAGAGENT_API__RATE_LIMIT_RPM`.
+`DIAGAGENT_API__RATE_LIMIT_RPM`. When running behind a trusted TLS reverse proxy,
+pass `--forwarded-allow-ips` to `scripts/run_api.py` so rate limits track client IPs.
 
 For live answers, configure an OpenAI-compatible provider, model and gateway
 in the profile or environment and set `DIAGAGENT_LLM__API_KEY` in `.env`.
@@ -392,10 +398,11 @@ regression check for the sample corpus.
 The gate uses `hybrid_rerank` by default. It requires status accuracy ≥ 0.98,
 abstention accuracy, citation validity and tool accuracy of 1.0, and both
 faithfulness and Recall@K ≥ 0.95. It returns exit code 1 for a failed or
-unmeasurable check. For frozen answers, pass `--replay '<replay.json>'` with a
-report generated from the same evaluation run and retrieval mode. The gate
-uses the replay's `with_request` scores and requires a valid score for every
-answered case.
+unmeasurable check. For a manual-only corpus without rule tables, pass
+`--allow-no-tools` to skip `tool_accuracy` when `tool_samples` is zero. For
+frozen answers, pass `--replay '<replay.json>'` with a report generated from the
+same evaluation run and retrieval mode. The gate uses the replay's `with_request`
+scores and requires a valid score for every answered case.
 
 ## Evaluation and Colab
 

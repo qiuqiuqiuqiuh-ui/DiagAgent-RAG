@@ -6,7 +6,7 @@ from src.core.exceptions import CorpusError
 from src.core.settings import IngestionSettings
 from src.ingestion.schemas import Chunk, Section, document_id
 
-_SEPARATORS = ("\n\n", "\n", " ")
+_SEPARATORS = ("\n\n", "\n", " ", "。", "；", "！", "？")
 
 
 def _split_text(text: str, size: int, overlap: int) -> Iterator[str]:

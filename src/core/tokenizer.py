@@ -11,8 +11,15 @@ _CJK_RUN = re.compile(
 
 
 def tokenize(text: str) -> list[str]:
-    """Case-fold words while keeping hyphenated and underscored equipment codes intact."""
-    return _TOKEN.findall(text.casefold())
+    """Case-fold words, keep hyphenated/underscored codes intact, and split CJK runs."""
+    terms: list[str] = []
+    for index, run in enumerate(split_cjk_runs(text.casefold())):
+        if index % 2 == 0:
+            terms.extend(_TOKEN.findall(run))
+        else:
+            terms.extend(run)
+            terms.extend(run[offset : offset + 2] for offset in range(len(run) - 1))
+    return terms
 
 
 def split_cjk_runs(text: str) -> list[str]:

@@ -15,23 +15,104 @@ const statusLabels = {
   ambiguous: ["Ambiguous", "amber"],
   unknown: ["Unknown", "amber"],
 };
-const presets = {
-  fault: { query: "What does VFD-OC3 mean?", equipment_id: "DRV-300", fault_code: "VFD-OC3" },
-  critical: {
-    query: "Find the PM-14 winding_temp critical threshold.",
-    equipment_id: "PM-14",
-    sensor_readings: { winding_temp: 118 },
-  },
-  cache: { query: "What does VFD-OC3 mean", equipment_id: "DRV-300", fault_code: "VFD-OC3" },
-  missing: { query: "What is the mounting bolt torque for the MX-200 motor?" },
-  scope: { query: "What is the Tokyo weather forecast for tomorrow?" },
-};
+const STORAGE_API_KEY = "diagagent.api_key";
+const STORAGE_ADMIN_KEY = "diagagent.admin_api_key";
 let health = null;
 let meta = null;
+let presets = {};
+let authRequired = false;
+let authPanelOpen = false;
+let memoryKeys = { apiKey: "", adminKey: "" };
 let building = false;
 let diagnosing = false;
 let refreshId = 0;
 let evidenceId = 0;
+
+function readSessionKey(storageKey, fallbackField) {
+  try {
+    return window.sessionStorage.getItem(storageKey) || "";
+  } catch {
+    return memoryKeys[fallbackField];
+  }
+}
+
+function writeSessionKey(storageKey, fallbackField, value) {
+  memoryKeys[fallbackField] = value;
+  try {
+    if (value) window.sessionStorage.setItem(storageKey, value);
+    else window.sessionStorage.removeItem(storageKey);
+  } catch {
+    // Fallback to in-memory credentials when sessionStorage is unavailable.
+  }
+}
+
+function getApiKey() {
+  return readSessionKey(STORAGE_API_KEY, "apiKey");
+}
+
+function getAdminKey() {
+  return readSessionKey(STORAGE_ADMIN_KEY, "adminKey");
+}
+
+function hasAnyKey() {
+  return Boolean(getApiKey() || getAdminKey());
+}
+
+function authHeaders(path) {
+  if (!path.startsWith("/v1/")) return {};
+  const key = path === "/v1/ingest" ? (getAdminKey() || getApiKey()) : getApiKey();
+  return key ? { "X-API-Key": key } : {};
+}
+
+function syncAuthUi() {
+  const panel = byId("auth-panel");
+  const toggle = byId("auth-toggle");
+  const showPanel = authRequired || authPanelOpen;
+  panel.hidden = !showPanel;
+  toggle.hidden = !authRequired && !hasAnyKey() && !authPanelOpen;
+  toggle.textContent = hasAnyKey() ? "API keys (set)" : "API keys";
+}
+
+function buildPresets(currentMeta) {
+  const isZh = (currentMeta?.domain?.language || "").toLowerCase().startsWith("zh");
+  const faultEntry = Object.entries(currentMeta?.fault_codes || {}).find(([, codes]) => codes.length);
+  const fault = faultEntry
+    ? {
+        query: isZh
+          ? `${faultEntry[1][0]} 故障码代表什么含义？应如何初步排查？`
+          : `What does ${faultEntry[1][0]} mean?`,
+        equipment_id: faultEntry[0],
+        fault_code: faultEntry[1][0],
+      }
+    : null;
+  const cache = fault
+    ? { ...fault, query: fault.query.replace(/[?？]+$/, "") }
+    : null;
+  const firstSensor = (currentMeta?.sensors || [])[0];
+  const critical = firstSensor
+    ? {
+        query: isZh
+          ? `查询 ${firstSensor.equipment_id} 的 ${firstSensor.sensor} 严重告警阈值并判断当前读数。`
+          : `Find the ${firstSensor.equipment_id} ${firstSensor.sensor} critical threshold.`,
+        equipment_id: firstSensor.equipment_id,
+        sensor_readings: { [firstSensor.sensor]: firstSensor.critical_threshold },
+      }
+    : null;
+  const firstAsset = (currentMeta?.equipment_ids || [])[0];
+  const missing = {
+    query: firstAsset
+      ? (isZh
+          ? `${firstAsset} 的安装螺栓额定紧固力矩是多少？`
+          : `What is the mounting bolt torque for ${firstAsset}?`)
+      : (isZh
+          ? "该设备的安装螺栓额定紧固力矩规范是多少？"
+          : "What is the mounting bolt torque specification for this equipment?"),
+  };
+  const scope = {
+    query: isZh ? "明天北京的天气预报是什么？" : "What is the Tokyo weather forecast for tomorrow?",
+  };
+  return { fault, critical, cache, missing, scope };
+}
 
 function element(tag, content = "", className = "") {
   const node = document.createElement(tag);
@@ -47,13 +128,16 @@ function message(node, text, error = false) {
 }
 
 async function requestJson(path, options = {}) {
-  const response = await fetch(path, { cache: "no-store", ...options });
+  const headers = { ...authHeaders(path), ...(options.headers || {}) };
+  const response = await fetch(path, { cache: "no-store", ...options, headers });
   const data = await response.json().catch(() => null);
   if (!response.ok || !data) {
     const detail = typeof data?.detail === "string"
       ? data.detail
       : data?.detail?.map?.((issue) => `${issue.loc.slice(1).join(".")}: ${issue.msg}`).join(" · ");
-    throw new Error(detail || `Request failed (${response.status}).`);
+    const error = new Error(detail || `Request failed (${response.status}).`);
+    error.status = response.status;
+    throw error;
   }
   return data;
 }
@@ -63,13 +147,25 @@ function setActions() {
   byId("build-index").textContent = building
     ? "Building index…"
     : health?.status === "ok" ? "Rebuild index" : "Build index";
-  byId("run-diagnosis").disabled = health?.status !== "ok" || building || diagnosing;
+  byId("run-diagnosis").disabled = health?.status !== "ok" || authRequired || building || diagnosing;
+}
+
+function renderPresets() {
+  presets = buildPresets(meta);
+  presetButtons.forEach((button) => {
+    const available = Boolean(presets[button.dataset.preset]);
+    button.hidden = !available;
+    button.disabled = !available;
+    if (!available) button.setAttribute("aria-pressed", "false");
+  });
 }
 
 function renderStatus() {
   const ready = health?.status === "ok";
   const mode = byId("mode");
-  mode.textContent = meta ? (meta.mode === "mock" ? "Mock" : "Live") : "Offline";
+  mode.textContent = meta
+    ? (meta.mode === "mock" ? "Mock" : "Live")
+    : authRequired ? "Auth required" : health ? "Connected" : "Offline";
   mode.title = meta ? `${meta.llm_model} · ${meta.embedding_model} · ${meta.reranker_model}` : "";
   if (meta) byId("domain").textContent = meta.domain.name;
   const status = byId("index-status");
@@ -81,9 +177,13 @@ function renderStatus() {
   version.textContent = health?.index_version ? `${health.index_version.slice(0, 12)}… ⧉` : "";
   version.title = health?.index_version || "";
   version.setAttribute("aria-label", "Copy index version");
-  byId("empty-hint").textContent = ready
-    ? "Choose a preset or enter a question to inspect results and evidence."
-    : "Build the index to enable diagnosis.";
+  byId("empty-hint").textContent = authRequired
+    ? "Enter an API key above to load equipment metadata and run diagnoses."
+    : ready
+      ? "Choose a preset or enter a question to inspect results and evidence."
+      : "Build the index to enable diagnosis.";
+  renderPresets();
+  syncAuthUi();
   setActions();
   updateSuggestions();
 }
@@ -91,16 +191,30 @@ function renderStatus() {
 async function refreshStatus() {
   const id = ++refreshId;
   try {
-    const [nextHealth, nextMeta] = await Promise.all([
-      requestJson("/health"), requestJson("/v1/meta"),
-    ]);
+    const nextHealth = await requestJson("/health");
     if (id !== refreshId) return;
     health = nextHealth;
-    meta = nextMeta;
   } catch {
     if (id !== refreshId) return;
     health = null;
     meta = null;
+    authRequired = false;
+    renderStatus();
+    return;
+  }
+  try {
+    const nextMeta = await requestJson("/v1/meta");
+    if (id !== refreshId) return;
+    meta = nextMeta;
+    if (authRequired) message(byId("system-notice"), "");
+    authRequired = false;
+  } catch (error) {
+    if (id !== refreshId) return;
+    meta = null;
+    if (error.status === 401 || error.status === 403) {
+      authRequired = true;
+      message(byId("system-notice"), "API key required to access diagnostic endpoints.", true);
+    }
   }
   renderStatus();
 }
@@ -129,10 +243,14 @@ function updateSensorHint(row, rules = matchingSensorRules()) {
 
 function updateSuggestions() {
   const asset = equipment.value.trim().toLowerCase();
+  const equipmentIds = meta?.equipment_ids || [];
   const faults = Object.entries(meta?.fault_codes || {});
   const matchingFaults = faults.filter(([id]) => !asset || id.toLowerCase() === asset);
-  setOptions("equipment-options", (meta?.equipment_ids || []).map((id) => [id]));
-  setOptions("fault-options", [...new Set(matchingFaults.flatMap(([, codes]) => codes))].map((code) => [code]));
+  const faultCodes = [...new Set(matchingFaults.flatMap(([, codes]) => codes))];
+  equipment.placeholder = equipmentIds[0] ? `e.g. ${equipmentIds[0]}` : "Optional equipment ID";
+  byId("fault-code").placeholder = faultCodes[0] ? `e.g. ${faultCodes[0]}` : "Optional fault code";
+  setOptions("equipment-options", equipmentIds.map((id) => [id]));
+  setOptions("fault-options", faultCodes.map((code) => [code]));
   const rules = matchingSensorRules();
   setOptions("sensor-options", [...new Map(rules.map((rule) => [rule.sensor, rule.unit]))]);
   sensorRows.querySelectorAll(".sensor-row").forEach((row) => updateSensorHint(row, rules));
@@ -168,6 +286,7 @@ function addSensor(name = "", value = "") {
 
 function loadPreset(name) {
   const preset = presets[name];
+  if (!preset) return;
   byId("query").value = preset.query;
   equipment.value = preset.equipment_id || "";
   byId("fault-code").value = preset.fault_code || "";
@@ -226,7 +345,7 @@ async function showEvidence(chunkId) {
   byId("evidence-state").textContent = "Loading the original passage…";
   evidence.showModal();
   try {
-    const chunk = await requestJson(`/v1/chunks/${encodeURIComponent(chunkId)}`);
+    const chunk = await requestJson(`/v1/chunks?chunk_id=${encodeURIComponent(chunkId)}`);
     if (id !== evidenceId || !evidence.open) return;
     byId("evidence-section").textContent = chunk.section_title;
     definitionList(byId("evidence-meta"), [
@@ -346,6 +465,30 @@ byId("copy-version").addEventListener("click", async () => {
   }
 });
 
+byId("auth-toggle").addEventListener("click", () => {
+  authPanelOpen = !authPanelOpen;
+  syncAuthUi();
+});
+
+byId("auth-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  writeSessionKey(STORAGE_API_KEY, "apiKey", byId("api-key").value.trim());
+  writeSessionKey(STORAGE_ADMIN_KEY, "adminKey", byId("admin-key").value.trim());
+  authPanelOpen = false;
+  message(byId("system-notice"), "");
+  await refreshStatus();
+});
+
+byId("clear-keys").addEventListener("click", async () => {
+  byId("api-key").value = "";
+  byId("admin-key").value = "";
+  writeSessionKey(STORAGE_API_KEY, "apiKey", "");
+  writeSessionKey(STORAGE_ADMIN_KEY, "adminKey", "");
+  authPanelOpen = false;
+  message(byId("system-notice"), "API credentials cleared for this session.");
+  await refreshStatus();
+});
+
 byId("build-index").addEventListener("click", async () => {
   building = true;
   setActions();
@@ -359,7 +502,19 @@ byId("build-index").addEventListener("click", async () => {
       byId("result-state").textContent = "";
     }
   } catch (error) {
-    message(byId("system-notice"), error.message, true);
+    if (error.status === 401 || error.status === 403) {
+      authPanelOpen = true;
+      syncAuthUi();
+      message(
+        byId("system-notice"),
+        error.status === 403
+          ? "Admin API key required for index rebuild."
+          : "API key required for index rebuild.",
+        true,
+      );
+    } else {
+      message(byId("system-notice"), error.message, true);
+    }
   } finally {
     await refreshStatus();
     building = false;
@@ -369,7 +524,7 @@ byId("build-index").addEventListener("click", async () => {
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
-  if (diagnosing || building || health?.status !== "ok") return;
+  if (diagnosing || building || health?.status !== "ok" || authRequired) return;
   const panel = document.querySelector(".result-panel");
   const resultState = byId("result-state");
   message(byId("form-error"), "");
@@ -388,6 +543,11 @@ form.addEventListener("submit", async (event) => {
     renderResult(data, request, performance.now() - start);
     resultState.textContent = "Diagnosis complete";
   } catch (error) {
+    if (error.status === 401 || error.status === 403) {
+      authRequired = error.status === 401;
+      authPanelOpen = true;
+      syncAuthUi();
+    }
     message(byId("form-error"), error.message, true);
     resultState.textContent = "";
   } finally {
@@ -397,5 +557,7 @@ form.addEventListener("submit", async (event) => {
   }
 });
 
+byId("api-key").value = getApiKey();
+byId("admin-key").value = getAdminKey();
 refreshStatus();
 setInterval(() => { if (!building) refreshStatus(); }, 15000);

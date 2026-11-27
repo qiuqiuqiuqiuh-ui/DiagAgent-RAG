@@ -48,6 +48,7 @@ class PathSettings(ProfileSection):
 class IngestionSettings(ProfileSection):
     chunk_size: int = Field(gt=0)
     chunk_overlap: int = Field(ge=0)
+    prune_generations_on_ingest: bool = False
 
     @model_validator(mode="after")
     def validate_overlap(self) -> "IngestionSettings":
@@ -90,6 +91,32 @@ class RetrievalSettings(ProfileSection):
 
 class CacheSettings(ProfileSection):
     similarity_threshold: float = Field(default=0.95, ge=0.95, le=1)
+    ttl_seconds: int | None = Field(default=None, gt=0)
+    max_entries: int | None = Field(default=10000, gt=0)
+
+
+class ApiSettings(ProfileSection):
+    api_key: SecretStr | None = None
+    admin_api_key: SecretStr | None = None
+    cors_allow_origins: tuple[str, ...] = ()
+    max_query_chars: int = Field(default=4000, gt=0)
+    max_sensor_readings: int = Field(default=64, ge=0)
+    rate_limit_rpm: int | None = Field(default=None, gt=0)
+    enable_metrics: bool = False
+
+    @field_validator("api_key", "admin_api_key", mode="before")
+    @classmethod
+    def unset_empty_key(cls, value: object) -> object:
+        if isinstance(value, str) and value == "":
+            return None
+        return value
+
+    @field_validator("api_key", "admin_api_key")
+    @classmethod
+    def require_nonblank_key(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is not None and not value.get_secret_value().strip():
+            raise ValueError("API keys must not be blank")
+        return value
 
 
 class ModelSettings(ProfileSection):
@@ -145,6 +172,7 @@ class Settings(BaseSettings):
     rules: RulesSettings = Field(default_factory=RulesSettings)
     retrieval: RetrievalSettings = Field(default_factory=RetrievalSettings)
     cache: CacheSettings = Field(default_factory=CacheSettings)
+    api: ApiSettings = Field(default_factory=ApiSettings)
     llm: LLMSettings
     judge_llm: LLMSettings | None = None
     embedding: EmbeddingSettings

@@ -1,0 +1,33 @@
+services:
+  api:
+    image: diagagent-rag:local
+    build:
+      context: .
+      args:
+        INSTALL_HF: ${INSTALL_HF:-false}
+    env_file:
+      - path: .env
+        required: false
+    ports:
+      - "127.0.0.1:${DIAGAGENT_PORT:-8000}:8000"
+    volumes:
+      - type: bind
+        source: ${DIAGAGENT_CORPUS_DIR:-./data/raw}
+        target: /app/data/raw
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DIAGAGENT_CONFIG_DIR:-./configs}
+        target: /app/configs
+        read_only: true
+        bind:
+          create_host_path: false
+      - index:/app/data/index
+      - cache:/app/data/cache
+      - hf-cache:/home/diagagent/.cache/huggingface
+
+volumes:
+  index:
+  cache:
+  hf-cache:

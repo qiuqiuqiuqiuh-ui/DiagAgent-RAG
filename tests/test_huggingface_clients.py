@@ -1,4 +1,7 @@
 import sys
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier, Lock
+from time import sleep
 from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
 
@@ -71,6 +74,46 @@ def test_adapts_huggingface_results_and_loads_each_model_once(
         convert_to_numpy=True,
         show_progress_bar=False,
     )
+
+
+@pytest.mark.parametrize("role", ["embedding", "reranker"])
+def test_huggingface_inference_serializes_access_to_each_model(
+    monkeypatch: pytest.MonkeyPatch, role: str
+) -> None:
+    active = 0
+    maximum = 0
+    guard = Lock()
+    workers = 6
+    barrier = Barrier(workers)
+
+    def infer(*args, **kwargs):
+        nonlocal active, maximum
+        with guard:
+            active += 1
+            maximum = max(active, maximum)
+        sleep(0.01)
+        with guard:
+            active -= 1
+        return [[3.0, 4.0]] if role == "embedding" else [0.5]
+
+    factory = Mock(return_value=SimpleNamespace(encode=infer, predict=infer))
+    module = ModuleType("sentence_transformers")
+    module.SentenceTransformer = module.CrossEncoder = factory
+    monkeypatch.setitem(sys.modules, "sentence_transformers", module)
+    embedding = create_embedding_client(EMBEDDING)
+    reranker = create_reranker(RERANKER)
+
+    def run(_: int):
+        barrier.wait(timeout=5)
+        if role == "embedding":
+            np.testing.assert_allclose(embedding.embed(["motor"]), [[0.6, 0.8]])
+        else:
+            assert reranker.score("motor", ["bearing"]) == [0.5]
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        list(pool.map(run, range(workers)))
+    assert maximum == 1
+    factory.assert_called_once()
 
 
 @pytest.mark.parametrize("failure", [OSError, RuntimeError, ValueError])

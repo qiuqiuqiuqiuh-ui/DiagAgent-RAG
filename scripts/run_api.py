@@ -32,7 +32,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except DiagAgentError as exc:
         print(f"API startup failed: {exc}", file=sys.stderr)
         return 1
-    uvicorn.run(app, host=args.host, port=args.port)
+    uvicorn.run(app, host=args.host, port=args.port, workers=1)
     return 0
 
 

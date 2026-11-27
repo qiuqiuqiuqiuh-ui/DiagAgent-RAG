@@ -1,3 +1,4 @@
+import logging
 import sqlite3
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -56,6 +57,126 @@ def test_semantic_cache_reuses_similar_vectors_and_isolates_scope(tmp_path: Path
         cache.lookup(scope, vector[None, :])
     with pytest.raises(ValueError, match="Expected a 1D embedding vector"):
         cache.store(scope, "matrix", vector[None, :], result)
+
+
+def test_cache_ttl_and_oldest_first_capacity_are_transactional(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = [100.0]
+    monkeypatch.setattr("src.api.cache.time", lambda: now[0])
+    cache = SQLiteSemanticCache(tmp_path / "cache.sqlite3", ttl_seconds=10, max_entries=2)
+    scope = CacheScope("index", "profile", "context")
+    result = DiagnosticResult(
+        status="answered",
+        intent="fault_diagnosis",
+        answer="Answer [manual.md#s0#c0]",
+        citations=(
+            Citation(
+                chunk_id="manual.md#s0#c0",
+                doc_id="manual.md",
+                source_path="manual.md",
+                section_title="Manual",
+            ),
+        ),
+    )
+    first, second, third = np.eye(3, dtype=np.float32)
+    cache.store(scope, "first", first, result)
+    now[0] = 101.0
+    cache.store(scope, "second", second, result)
+    now[0] = 102.0
+    cache.store(scope, "third", third, result)
+    assert cache.lookup(scope, first) is None
+    assert cache.lookup(scope, second) == cache.lookup(scope, third) == result
+    now[0] = 111.0
+    assert cache.lookup(scope, second) is None and cache.lookup(scope, third) == result
+    cache.store(scope, "first", first, result)
+    with closing(cache._connect()) as con:
+        assert con.execute("PRAGMA journal_mode").fetchone() == ("wal",)
+        assert con.execute("PRAGMA busy_timeout").fetchone() == (5000,)
+        assert con.execute(
+            "SELECT stored_at FROM semantic_cache ORDER BY stored_at"
+        ).fetchall() == [(102.0,), (111.0,)]
+
+
+def test_cache_migrates_untimestamped_database_without_discarding_default_entries(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "previous.sqlite3"
+    scope = CacheScope("index", "profile", "context")
+    vector = np.array([1.0], dtype="<f4")
+    result = DiagnosticResult(
+        status="answered",
+        intent="fault_diagnosis",
+        answer="Answer [manual.md#s0#c0]",
+        citations=(
+            Citation(
+                chunk_id="manual.md#s0#c0",
+                doc_id="manual.md",
+                source_path="manual.md",
+                section_title="Manual",
+            ),
+        ),
+    )
+    with closing(sqlite3.connect(path)) as con, con:
+        con.execute(
+            """
+            CREATE TABLE semantic_cache (
+                index_version TEXT, profile_hash TEXT, context_hash TEXT, query_hash TEXT,
+                vector BLOB, result TEXT,
+                PRIMARY KEY(index_version, profile_hash, context_hash, query_hash)
+            ) WITHOUT ROWID
+            """
+        )
+        con.execute(
+            "INSERT INTO semantic_cache VALUES (?, ?, ?, ?, ?, ?)",
+            (*scope.as_params(), "query", vector.tobytes(), result.model_dump_json()),
+        )
+    assert SQLiteSemanticCache(path).lookup(scope, vector) == result
+    assert SQLiteSemanticCache(path, ttl_seconds=60).lookup(scope, vector) is None
+
+
+def test_parallel_diagnoses_do_not_contaminate_cache_rows(
+    api_settings: Settings, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(logging.getLogger("diagagent"), "propagate", True)
+    api_settings.cache.max_entries = 32
+    readings = tuple(100 + offset for offset in range(16))
+    with TestClient(create_app(api_settings)) as client:
+        client.post("/v1/ingest").raise_for_status()
+
+        def run(reading: int) -> dict:
+            response = client.post(
+                "/v1/diagnose",
+                json={
+                    "query": "Find the PM-14 winding_temp critical threshold.",
+                    "equipment_id": "PM-14",
+                    "sensor_readings": {"winding_temp": reading},
+                },
+            )
+            response.raise_for_status()
+            return response.json()
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for expected_hit in (False, True):
+                for reading, result in zip(readings, pool.map(run, readings), strict=True):
+                    assert result["status"] == "answered" and result["cache_hit"] is expected_hit
+                    assert result["tool_findings"][0]["reading"] == reading
+
+    assert not any(
+        record.message in {"cache.lookup_failed", "cache.store_failed"} for record in caplog.records
+    )
+    with closing(sqlite3.connect(api_settings.paths.cache_file)) as con:
+        assert con.execute("SELECT COUNT(*) FROM semantic_cache").fetchone() == (len(readings),)
+
+
+def test_ingest_can_retain_one_historical_generation(api_settings: Settings) -> None:
+    api_settings.ingestion.prune_generations_on_ingest = True
+    with TestClient(create_app(api_settings)) as client:
+        generations = [client.post("/v1/ingest").json()["generation"] for _ in range(3)]
+        assert {
+            path.name for path in (api_settings.paths.index_dir / "generations").iterdir()
+        } == set(generations[-2:])
+        assert client.get("/health/ready").status_code == 200
 
 
 def test_context_hash_keeps_precision_and_entities(api_settings: Settings) -> None:

@@ -188,6 +188,118 @@ For a CLI rebuild with cleanup, run `python scripts/ingest.py --prune-generation
 to retain the active generation and the most recently modified historical
 generation. Set the count to `0` to retain only the active generation.
 
+## Deployment
+
+### Run the container
+
+The image runs as UID/GID `10001` with one Uvicorn worker. By default it uses the
+CPU Mock profile in `configs/production.yaml`. Compose mounts the corpus and
+configs read-only, and persists the index, SQLite cache, and Hugging Face cache
+in separate named volumes. It binds port 8000 to loopback. For external access,
+place a TLS-terminating proxy in front of the service. Keep the SQLite volume on
+local storage. The optional `.env` entry requires Docker Compose 2.24 or newer.
+[Compose environment files](https://docs.docker.com/compose/how-tos/environment-variables/set-environment-variables/) · [Docker volumes](https://docs.docker.com/engine/storage/volumes/)
+
+Set `DIAGAGENT_API__API_KEY` and `DIAGAGENT_API__ADMIN_API_KEY` in `.env` for
+protected deployments. Clients can use `X-API-Key` or `Authorization: Bearer`.
+The regular key authorizes `/v1/diagnose`, `/v1/meta`, and `/v1/chunks/*`.
+The admin key authorizes ingestion and, when enabled, `/metrics`. The regular
+key also authorizes those administrative routes when an admin key is unset.
+Set `DIAGAGENT_API__CORS_ALLOW_ORIGINS` to a JSON list of permitted browser
+origins if cross-origin calls are required. The rate limit is per peer and
+role, returns a `Retry-After` header on HTTP 429, and is configured through
+`DIAGAGENT_API__RATE_LIMIT_RPM`.
+
+For live answers, configure an OpenAI-compatible provider, model and gateway
+in the profile or environment and set `DIAGAGENT_LLM__API_KEY` in `.env`.
+Keep `.env` out of version control. For a local smoke test with a fresh index
+volume, use throwaway keys in `.env` and the shipped sample corpus.
+
+```dotenv
+DIAGAGENT_API__API_KEY=local-diagnostic-smoke-key
+DIAGAGENT_API__ADMIN_API_KEY=local-admin-smoke-key
+```
+
+```bash
+docker compose -p diagagent-smoke up --build --wait
+base=http://127.0.0.1:8000
+curl -fsS "$base/health/live"
+curl -sS -o /dev/null -w '%{http_code}\n' "$base/health/ready"  # 503 before ingestion
+curl -fsS -X POST -H 'X-API-Key: local-admin-smoke-key' "$base/v1/ingest"
+curl -fsS "$base/health/ready"  # 200 after ingestion
+body='{"query":"What does VFD-OC3 mean?","equipment_id":"DRV-300"}'
+for request in 1 2; do
+  curl -fsS -H 'X-API-Key: local-diagnostic-smoke-key' -H 'Content-Type: application/json' \
+    --data "$body" "$base/v1/diagnose"
+  printf '\n'
+done
+```
+
+The diagnosis JSON should show `cache_hit: false` followed by `cache_hit: true`.
+Check the container UID with `docker compose -p diagagent-smoke exec api id -u`.
+`/health/live` is the process probe and `/health/ready` checks the active index.
+The service returns `X-Request-ID` with each request and includes it in
+structured log fields. Metrics are opt-in through `api.enable_metrics` and
+include HTTP and diagnosis counts, cache outcomes, retry distribution, a
+diagnosis latency histogram in seconds, and index readiness and size.
+[Prometheus exposition format](https://prometheus.io/docs/instrumenting/exposition_formats/)
+
+### GPU workers and offline model cache
+
+Build with `INSTALL_HF=true` to include the optional Hugging Face dependencies.
+Before disconnecting the deployment from the model registry, populate the
+same `hf-cache` volume the serving container will use.
+
+```bash
+INSTALL_HF=true docker compose build api
+docker compose run --rm --no-deps api python -c \
+  'from sentence_transformers import SentenceTransformer, CrossEncoder; SentenceTransformer("BAAI/bge-m3", device="cpu"); CrossEncoder("BAAI/bge-reranker-v2-m3", device="cpu")'
+```
+
+For an offline serving environment set `HF_HUB_OFFLINE=1` and select the
+preloaded models in the profile. Docker can expose the GPU through a Compose
+GPU reservation. Set the model devices to `cuda` and run one worker per GPU
+instance. The embedding and reranking clients serialize calls per model instance.
+Rate limits and metrics counters are process-local.
+[Compose GPU support](https://docs.docker.com/compose/how-tos/gpu-support/)
+
+### Hot rebuild and rollback
+
+Publish the complete corpus within the mounted directory and keep it stable
+during ingestion. Archive the previous corpus, matching profile and active
+`manifest.json` before a rebuild. Call `POST /v1/ingest` with the admin key
+and verify the new `index_version` through `/health/ready`. In-flight
+diagnoses keep their current snapshot, and new requests use the new snapshot
+after publication. The production profile retains the active generation and
+one historical generation.
+
+To roll back, stop the API, restore the corpus and model profile for the
+chosen generation, and confirm the generation's FAISS and Chunk files are
+still in the index volume. With the matching historical manifest saved as
+`release/manifest.json`, restore the active pointer and restart.
+
+```bash
+docker compose stop api
+docker compose run --rm --no-deps \
+  --volume "$PWD/release/manifest.json:/restore/manifest.json:ro" api python -c '
+from pathlib import Path
+from src.retrieval.index import IndexManifest
+root = Path("/app/data/index")
+data = Path("/restore/manifest.json").read_bytes()
+manifest = IndexManifest.model_validate_json(data)
+generation = root / "generations" / manifest.generation
+if not all((generation / name).is_file() for name in ("chunks.jsonl", "vectors.faiss")):
+    raise SystemExit("Restore the archived generation artifacts first")
+staged = root / ".rollback-manifest.tmp"
+staged.write_bytes(data)
+staged.replace(root / "manifest.json")'
+docker compose up --wait
+curl -fsS http://127.0.0.1:8000/health/ready
+```
+
+Startup checks the restored manifest against the corpus and model profile.
+Confirm readiness reports the expected `index_version` before routing traffic.
+
 ## Onboard a bilingual industrial corpus
 
 ### Prepare files and rule tables

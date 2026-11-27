@@ -2,6 +2,7 @@ import logging
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from functools import cached_property
+from threading import Lock
 from time import perf_counter
 from typing import TYPE_CHECKING
 
@@ -77,6 +78,7 @@ class CrossEncoderReranker(BaseReranker):
     def __init__(self, settings: RerankerSettings) -> None:
         super().__init__(settings.model)
         self._device = settings.device
+        self._inference_lock = Lock()
 
     @cached_property
     def _encoder(self) -> "CrossEncoder":
@@ -90,11 +92,12 @@ class CrossEncoderReranker(BaseReranker):
 
     def _score(self, query: str, candidates: Sequence[str]) -> ArrayLike:
         try:
-            result = self._encoder.predict(
-                [(query, text) for text in candidates],
-                convert_to_numpy=True,
-                show_progress_bar=False,
-            )
+            with self._inference_lock:
+                result = self._encoder.predict(
+                    [(query, text) for text in candidates],
+                    convert_to_numpy=True,
+                    show_progress_bar=False,
+                )
             scores = np.asarray(result)
         except (OSError, RuntimeError, ValueError) as exc:
             raise ModelClientError("Cross-encoder scoring failed") from exc

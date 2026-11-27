@@ -3,6 +3,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from functools import cached_property
 from hashlib import blake2b
+from threading import Lock
 from time import perf_counter
 from typing import TYPE_CHECKING
 
@@ -145,6 +146,7 @@ class SentenceTransformerEmbeddingClient(BaseEmbeddingClient):
         super().__init__(settings.model, settings.dimension)
         self._device = settings.device
         self._batch_size = settings.batch_size
+        self._inference_lock = Lock()
 
     @cached_property
     def _encoder(self) -> "SentenceTransformer":
@@ -158,12 +160,13 @@ class SentenceTransformerEmbeddingClient(BaseEmbeddingClient):
 
     def _embed(self, texts: Sequence[str]) -> ArrayLike:
         try:
-            return self._encoder.encode(
-                list(texts),
-                batch_size=self._batch_size,
-                convert_to_numpy=True,
-                show_progress_bar=False,
-            )
+            with self._inference_lock:
+                return self._encoder.encode(
+                    list(texts),
+                    batch_size=self._batch_size,
+                    convert_to_numpy=True,
+                    show_progress_bar=False,
+                )
         except (OSError, RuntimeError, ValueError) as exc:
             raise ModelClientError("Sentence-transformer embedding failed") from exc
 

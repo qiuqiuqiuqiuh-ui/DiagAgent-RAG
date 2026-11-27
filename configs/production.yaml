@@ -1,0 +1,32 @@
+domain:
+  name: Industrial Equipment Fault Diagnosis & Maintenance Manuals
+  language: en
+paths:
+  corpus_dir: data/raw
+  index_dir: data/index
+  cache_file: data/cache/semantic.sqlite3
+  reports_dir: reports/generated
+ingestion:
+  chunk_size: 1000
+  chunk_overlap: 150
+  prune_generations_on_ingest: true
+cache:
+  similarity_threshold: 0.95
+  ttl_seconds: 86400
+  max_entries: 10000
+api:
+  enable_metrics: true
+  rate_limit_rpm: 120
+  max_query_chars: 4000
+  max_sensor_readings: 64
+llm:
+  provider: mock
+  model: mock-llm-v1
+embedding:
+  provider: mock
+  model: mock-hash-v1
+  dimension: 384
+reranker:
+  provider: mock
+  model: mock-keyword-v1
+log_level: INFO

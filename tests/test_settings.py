@@ -48,6 +48,21 @@ def test_bilingual_production_template_loads_without_credentials() -> None:
     assert not settings.rules.allow_missing_rule_tables
 
 
+def test_production_container_profile_accepts_secret_and_cors_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DIAGAGENT_API__API_KEY", "test-deployment-key")
+    monkeypatch.setenv("DIAGAGENT_API__CORS_ALLOW_ORIGINS", '["https://ops.example.test"]')
+    settings = load_settings("configs/production.yaml", project_root=PROJECT_ROOT, env_file=None)
+    assert settings.llm.provider == "mock"
+    assert settings.ingestion.prune_generations_on_ingest
+    assert settings.cache.ttl_seconds == 86400
+    assert settings.api.enable_metrics and settings.api.rate_limit_rpm == 120
+    assert settings.api.cors_allow_origins == ("https://ops.example.test",)
+    assert isinstance(settings.api.api_key, SecretStr)
+    assert "test-deployment-key" not in settings.model_dump_json()
+
+
 def test_rule_paths_accept_nested_env_override_and_reject_traversal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

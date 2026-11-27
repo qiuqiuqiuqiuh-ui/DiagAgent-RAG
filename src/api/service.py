@@ -9,6 +9,7 @@ from types import MappingProxyType
 from src.agents.tools import DiagnosticTools
 from src.agents.workflow import DiagnosticWorkflow, create_diagnostic_workflow
 from src.api.cache import CacheScope, SQLiteSemanticCache, context_hash, profile_hash
+from src.api.metrics import ApiMetrics
 from src.api.schemas import (
     ChunkDetailResponse,
     DiagnoseRequest,
@@ -27,7 +28,7 @@ from src.ingestion.corpus import read_corpus
 from src.ingestion.pipeline import build_index
 from src.ingestion.schemas import Chunk
 from src.retrieval.hybrid import HybridRetriever
-from src.retrieval.index import IndexManifest, load_index
+from src.retrieval.index import IndexManifest, load_index, prune_generations
 
 _LOGGER = logging.getLogger("diagagent.api")
 
@@ -51,13 +52,19 @@ class DiagnosticService:
         embedder: BaseEmbeddingClient,
         reranker: BaseReranker,
         llm: BaseLLMClient,
+        *,
+        metrics: ApiMetrics | None = None,
     ) -> None:
         self._settings = settings
         self._embedding = embedder
         self._reranker = reranker
         self._llm = llm
+        self._metrics = metrics
         self._cache = SQLiteSemanticCache(
-            settings.paths.cache_file, settings.cache.similarity_threshold
+            settings.paths.cache_file,
+            settings.cache.similarity_threshold,
+            ttl_seconds=settings.cache.ttl_seconds,
+            max_entries=settings.cache.max_entries,
         )
         self._profile_hash = profile_hash(settings)
         self._snapshot: _Snapshot | None = None
@@ -149,6 +156,16 @@ class DiagnosticService:
                         level=logging.WARNING,
                         reason=type(exc).__name__,
                     )
+            if self._settings.ingestion.prune_generations_on_ingest:
+                try:
+                    prune_generations(self._settings.paths.index_dir)
+                except IndexValidationError as exc:
+                    log_event(
+                        _LOGGER,
+                        "index.prune_failed",
+                        level=logging.WARNING,
+                        reason=type(exc).__name__,
+                    )
             return snapshot.manifest
 
     def diagnose(self, request: DiagnoseRequest) -> DiagnoseResponse:
@@ -175,7 +192,9 @@ class DiagnosticService:
 
         cache_hit = result is not None
         if result is None:
-            result = snapshot.workflow.invoke(diagnosis, include_trace=request.include_trace)
+            result = snapshot.workflow.invoke(
+                diagnosis, include_trace=request.include_trace or self._metrics is not None
+            )
             if scope is not None and embedding is not None:
                 try:
                     with self._cache_write_lock:
@@ -194,6 +213,11 @@ class DiagnosticService:
                         reason=type(exc).__name__,
                     )
 
+        if self._metrics is not None:
+            outcome = "bypass" if request.bypass_cache else "hit" if cache_hit else "miss"
+            retries = result.trace.retry_count if result.trace is not None else None
+            self._metrics.observe_diagnosis(result.status, outcome, retries)
+
         log_event(
             _LOGGER,
             "api.diagnose",
@@ -203,4 +227,5 @@ class DiagnosticService:
             status=result.status,
             latency_ms=(perf_counter() - started) * 1000,
         )
-        return DiagnoseResponse(**result.model_dump(), cache_hit=cache_hit)
+        payload = result.model_dump(exclude=None if request.include_trace else {"trace"})
+        return DiagnoseResponse(**payload, cache_hit=cache_hit)

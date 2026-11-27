@@ -344,8 +344,61 @@ measures first-pass routing on these cases.
 In a separate `hybrid_rrf` smoke, all 15 final statuses matched the reference.
 The same model scored the 12 answered cases, with mean faithfulness of 0.9917
 and no judge errors. Abstentions and out-of-scope cases received no score.
-The validation of `llm-critic-v3` covers these targeted runs. The full 54 × 4
-benchmark for `llm-critic-v3` remains pending.
+
+#### Full `llm-critic-v3` regression
+
+Run `20261126T123320700668Z` evaluated 54 cases per mode with the same
+Qianwen gateway, model, dataset, index, and `top_k=5` as the v2 candidate.
+The optional judge was disabled. The four mode runs took 31.35 minutes in
+total. The v3 policy SHA-256 is recorded above.
+[Full v3 benchmark report](reports/benchmarks/20261126T130453638391Z_live_golden_bench.md).
+
+| Outcome | Dense only | BM25 only | Hybrid RRF | Hybrid rerank |
+|---|---:|---:|---:|---:|
+| Correct final status (v2 → v3) | 53/54 → 53/54 | 53/54 → 53/54 | 54/54 → 53/54 | 54/54 → 53/54 |
+| Gold-answerable cases answered (v2 → v3) | 46/46 → 45/46 | 46/46 → 45/46 | 46/46 → 45/46 | 46/46 → 45/46 |
+| Gold evidence-insufficient cases answered in error (v2 → v3) | 1/6 → 0/6 | 1/6 → 0/6 | 0/6 → 0/6 | 0/6 → 0/6 |
+| v3 answers with valid citations | 45/45 | 45/45 | 45/45 | 45/45 |
+
+`bench-47` now returns `insufficient_evidence` in all four modes.
+`bench-27` is the only new status regression and prevents passing the
+zero-false-refusal criterion. It returns `insufficient_evidence` in every
+mode despite retrieving both annotated sections in the first pass and
+using both workflow retries. The question permits a qualitative reading
+of the manual, while the final missing-evidence lists ask for duty-point
+values and field observations. The run saved final answers and node
+traces. Antigravity independently verified the artifacts and reproduced all
+216 paired comparisons. A 12-run follow-up with the same v3 policy and
+index reproduced three refusals in four `bench-27` runs. All ten drafts
+sent to the critic for this case cited both annotated sections and
+explained the qualitative comparison. Nine critic decisions asked for
+duty-point values and field observations before approving an answer.
+The v4 candidate clarifies the evidence requirement for qualitative
+guidance. In the 12-run v4 follow-up, all four `bench-27` runs answered on
+the first attempt. Both answerable controls and all six insufficient-evidence
+controls returned the expected status. First-pass rankings matched v3
+in all 12 runs.
+
+#### Full `llm-critic-v4` regression
+
+Run `20261127T022823191425Z` used the same model, dataset, index, and
+`top_k=5` as v3. The cache profile uses `llm-critic-v4`, and the SHA-256
+of `src/agents/policy.py` is
+`815441297333e96087e779cf5306ed68ea0741b241542c2143e6871fcf432e08`.
+Every retrieval mode correctly answered all 46 answerable
+cases, abstained on all six insufficient-evidence cases, and identified
+both out-of-scope cases. The four status changes from v3 were all
+`bench-27` recoveries. First-pass rankings matched v3 across all 216
+case-mode pairs. All 184 answers passed citation validation. `bench-26`
+retained its routing mismatch across all four modes, and `bench-10` had a
+routing mismatch in Dense only. Both cases answered in all modes. The
+four mode runs took 28.45 minutes in total. Independent Judge scoring
+used `qwen-plus-2025-12-01` on the 46 frozen Hybrid RRF answers with
+their original requests, cited evidence, and tool findings. All 46
+received a score, with a mean faithfulness of 0.9826. There were 42 scores
+of 1.0 and four of 0.8. `bench-27` received 1.0. The two `smoke-06` runs,
+with and without the structured request, each received 1.0.
+[Full v4 benchmark report](reports/benchmarks/20261127T025706075569Z_live_golden_bench.md).
 
 `python scripts/verify_e2e.py` is the offline Antigravity entry point. It
 uses temporary index, cache and report paths and exercises ingestion, the

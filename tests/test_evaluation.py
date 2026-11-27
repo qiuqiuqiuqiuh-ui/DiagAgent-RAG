@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from src.agents.citations import validate_citations
-from src.agents.schemas import DiagnosticResult, FaultCodeFinding
+from src.agents.schemas import DiagnosticRequest, DiagnosticResult, FaultCodeFinding
 from src.agents.tools import DiagnosticTools
 from src.core.embedding import create_embedding_client
 from src.core.exceptions import CorpusError, ModelClientError
@@ -116,7 +116,12 @@ def test_case_citations_metric_aggregation_and_optional_judge() -> None:
         answer=answer,
         citations=validate_citations(answer, [chunk]),
     )
-    judge = MockLLMClient(responder=lambda messages: '```json\n{"faithfulness":0.75}\n```')
+
+    def respond(messages: Sequence[ChatMessage]) -> str:
+        assert "request" not in json.loads(messages[1].content)
+        return '```json\n{"faithfulness":0.75}\n```'
+
+    judge = MockLLMClient(responder=respond)
     faithfulness = judge_faithfulness(judge, case.request.query, result, [chunk])
     assert faithfulness == 0.75
     supported = score_case(
@@ -128,6 +133,31 @@ def test_case_citations_metric_aggregation_and_optional_judge() -> None:
     assert report.citation_coverage == report.citation_validity == 0.5
     assert report.latency_p50_ms == 5 and report.latency_p95_ms == pytest.approx(7.7)
     assert report.faithfulness == 0.75 and report.judge_samples == 1
+
+
+@pytest.mark.parametrize("readings", [{}, {"belt_speed": 0}])
+def test_judge_receives_diagnostic_request_context(readings: dict[str, int]) -> None:
+    request = DiagnosticRequest(
+        query="What does ERR-402 mean?",
+        equipment_id="CV-40",
+        fault_code="ERR-402",
+        sensor_readings=readings,
+    )
+    result = DiagnosticResult(status="answered", intent="fault_diagnosis", answer="Alarm details.")
+
+    def respond(messages: Sequence[ChatMessage]) -> str:
+        assert "what the user provided or omitted" in messages[0].content
+        payload = json.loads(messages[1].content)
+        assert payload["query"] == request.query
+        assert payload["request"] == {
+            "equipment_id": "CV-40",
+            "fault_code": "ERR-402",
+            "sensor_readings": readings,
+        }
+        return '{"faithfulness":1.0}'
+
+    judge = MockLLMClient(responder=respond)
+    assert judge_faithfulness(judge, request.query, result, [], request=request) == 1.0
 
 
 def test_scoring_rejects_extra_and_reused_findings() -> None:
@@ -207,12 +237,17 @@ def test_evaluation_preserves_full_report_when_one_judge_call_fails(
     settings.llm.provider = "openai_compatible"
     dataset = load_dataset(ROOT / "data" / "eval" / "golden_smoke.jsonl")
     dataset = replace(dataset, cases=dataset.cases[:2])
+    requests = {case.request.query: case.request for case in dataset.cases}
     judge_calls = 0
 
     def respond(messages: Sequence[ChatMessage]) -> str:
         nonlocal judge_calls
         prompt = messages[0].content
         if '"faithfulness"' in prompt:
+            payload = json.loads(messages[1].content)
+            assert payload["request"] == requests[payload["query"]].model_dump(
+                mode="json", exclude={"query"}
+            )
             judge_calls += 1
             if judge_calls == 1:
                 raise ModelClientError("provider limited the judge", status_code=429)

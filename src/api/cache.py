@@ -35,7 +35,7 @@ def profile_hash(settings: Settings) -> str:
         include={"domain", "retrieval", "llm", "embedding", "reranker"},
         exclude={"llm": {"api_key"}, "embedding": {"api_key"}},
     )
-    policy = "mock-extractive" if settings.llm.provider == "mock" else "llm-critic-v3"
+    policy = "mock-extractive" if settings.llm.provider == "mock" else "llm-critic-v4"
     return _digest({"key_version": _KEY_VERSION, "diagnostic_policy": policy, "profile": profile})
 
 

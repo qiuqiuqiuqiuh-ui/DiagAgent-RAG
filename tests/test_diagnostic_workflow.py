@@ -291,6 +291,55 @@ def test_live_router_retries_bad_json_or_intent(chunk: Chunk, invalid: str) -> N
     assert "Use out_of_scope only for an unrelated" in router_prompt.content
 
 
+def test_live_critic_reviews_a_cited_qualitative_answer_without_readings() -> None:
+    duty, vibration = chunk_sections(
+        "pump.md",
+        [
+            Section(title="Duty point", text="Use the duty point to interpret pump readings."),
+            Section(
+                title="Vibration follow-up",
+                text="Compare vibration alongside flow and pressure for operating changes.",
+            ),
+        ],
+        IngestionSettings(chunk_size=100, chunk_overlap=0),
+    )
+    answer = (
+        f"Use the pump duty point as the reference [{duty.chunk_id}]. "
+        f"Compare vibration with flow and pressure for operating changes [{vibration.chunk_id}]. "
+        "The actual operating condition requires field readings."
+    )
+
+    def respond(messages: Sequence[ChatMessage]) -> str:
+        prompt = messages[0].content
+        if "Classify the request" in prompt:
+            return '{"intent":"fault_diagnosis"}'
+        if "Draft a concise" in prompt:
+            return json.dumps({"answer": answer})
+        assert "accept a direct answer grounded in applicable cited guidance" in prompt
+        assert "Require field readings when needed to determine the actual condition" in prompt
+        payload = json.loads(messages[1].content)
+        assert payload["context"]["request"]["sensor_readings"] == {}
+        assert payload["answer"] == answer
+        assert [citation["chunk_id"] for citation in payload["citations"]] == [
+            duty.chunk_id,
+            vibration.chunk_id,
+        ]
+        return '{"sufficient":true,"missing_aspects":[],"refined_query":null}'
+
+    result = DiagnosticWorkflow(
+        RecordingRetriever([duty, vibration]),
+        DiagnosticTools(),
+        LLMDiagnosticPolicy(MockLLMClient(responder=respond), DOMAIN),
+    ).invoke(
+        DiagnosticRequest(
+            query="How should PM-14 duty point inform a vibration follow-up?",
+            equipment_id="PM-14",
+        )
+    )
+    assert result.status == "answered" and result.answer == answer
+    assert result.trace is not None and result.trace.retry_count == 0
+
+
 @pytest.mark.parametrize(
     "draft",
     [

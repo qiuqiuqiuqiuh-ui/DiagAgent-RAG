@@ -62,7 +62,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             app.state.diagnostic_service = service
             yield
 
-    app = FastAPI(title="DiagAgent-RAG", version="1.0", lifespan=lifespan)
+    app = FastAPI(title="DiagAgent-RAG", version="2.0.0", lifespan=lifespan)
     app.state.access_control = AccessControl(configured.api)
     app.router.route_class = ProtectedRoute
     if configured.api.cors_allow_origins:

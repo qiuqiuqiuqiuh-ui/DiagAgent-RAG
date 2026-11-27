@@ -163,6 +163,12 @@ if the index is not ready. Choose a preset or enter a request, then select
 response, or enable **Bypass cache** to run a fresh workflow with its trace.
 The same page works with the default offline Mock profile and with live profiles.
 
+![Fault code diagnosis with source evidence drawer](docs/images/demo-fault-evidence.png)
+
+![Critical sensor threshold finding and workflow trace](docs/images/demo-critical-sensor.png)
+
+![Insufficient evidence refusal with retry and top-k expansion trace](docs/images/demo-missing-spec-retries.png)
+
 You can also build the index and submit a diagnosis from PowerShell.
 `GET /health` reports `not_ready` until a compatible index is loaded.
 The [interactive API documentation](http://127.0.0.1:8000/docs) lists the full

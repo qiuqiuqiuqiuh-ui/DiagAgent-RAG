@@ -193,11 +193,37 @@ timestamped JSON and Markdown under the configured reports directory. The
 default local profile writes to the Git-ignored `reports/generated/`.
 Reports identify the dataset hash, index and model profile. They include
 Recall@K, MRR@K, NDCG@K, citation and tool metrics, routing and abstention
-accuracy, and P50/P95 workflow latency. Add `--judge` to a live run for
-optional faithfulness scoring with the configured LLM. The CLI prints progress
-as each mode completes. A failed judge call leaves that case's faithfulness
-unscored. Reports retain the case and count valid judge scores in
-`judge_samples`.
+accuracy, and P50/P95 workflow latency. Add `--judge` to score answered cases
+with a live judge. The evaluator uses `judge_llm` when configured and falls
+back to `llm` otherwise. Add `--require-heterogeneous-judge`
+with `--judge` to enforce a different model name. See `configs/colab.yaml` and
+`.env.example` for gateway and credential settings. A failed judge call leaves
+the case in the report. `Judge samples` in Markdown and `judge_samples` in JSON
+give the number of valid scores used in the mean for each mode.
+
+Use `--save-answers` to write one `*_answers.json` per retrieval mode in the
+reports directory. The files include the ordered results, citations with the
+original chunk text, tool findings, and node traces. The default Mock profile
+can freeze answers without a judge. Replay reads frozen answers and the same
+labeled dataset, then sends the selected answers to the configured judge
+without running the diagnostic workflow or opening the retrieval index.
+
+```powershell
+python scripts/evaluate.py --save-answers --dataset data/eval/golden_smoke.jsonl
+python scripts/replay_judge.py --answers 'reports/generated/<run_id>_hybrid_rrf_answers.json' --dataset data/eval/golden_smoke.jsonl --config configs/colab.yaml --paired --output reports/generated/judge-replay.json
+```
+
+Replace `<run_id>` with the generated timestamp and configure `judge_llm` before
+replay. You can also pass `--model` and `--base-url` together with the process
+environment variable `DIAGAGENT_JUDGE_LLM__API_KEY`. A standalone key leaves the
+dedicated judge disabled in profiles without a `judge_llm` section. Repeat
+`--case-id` to score chosen answered cases. For an archived Phase B smoke report
+with citation metadata only, use `--evidence-report` to supply reports with chunk
+text from the same index version. `--paired` scores each answer with and without
+structured request context. Replay records each arm's valid sample count and computes
+paired deltas only for cases with two valid scores. A failed judge call yields a
+nonzero exit status and remains visible in the JSON. Use a new output path.
+Replay creates missing parent directories before scoring.
 
 Open [colab_gpu_pipeline.ipynb](notebooks/colab_gpu_pipeline.ipynb) in Colab
 with a GPU runtime. The notebook mounts Drive, uses the repository at

@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Literal
 
@@ -114,9 +115,18 @@ class Settings(BaseSettings):
     retrieval: RetrievalSettings = Field(default_factory=RetrievalSettings)
     cache: CacheSettings = Field(default_factory=CacheSettings)
     llm: LLMSettings
+    judge_llm: LLMSettings | None = None
     embedding: EmbeddingSettings
     reranker: RerankerSettings
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+
+    @field_validator("judge_llm", mode="before")
+    @classmethod
+    def ignore_standalone_judge_key(cls, value: object) -> object:
+        # A key can be supplied in advance for replay with an explicit model and gateway.
+        if isinstance(value, Mapping) and set(value) == {"api_key"}:
+            return None
+        return value
 
     @field_validator("log_level", mode="before")
     @classmethod
@@ -150,8 +160,8 @@ def load_settings(
     try:
         with profile.open(encoding="utf-8-sig") as stream:
             values = yaml.safe_load(stream)
-    except (OSError, UnicodeError, yaml.YAMLError) as exc:
-        raise ConfigurationError(f"Could not read YAML profile {profile}") from exc
+    except (OSError, UnicodeError, yaml.YAMLError):
+        raise ConfigurationError(f"Could not read YAML profile {profile}") from None
 
     if not isinstance(values, dict) or any(not isinstance(key, str) for key in values):
         raise ConfigurationError(f"YAML profile {profile} must be a mapping with string keys")
@@ -163,8 +173,14 @@ def load_settings(
     except ValidationError as exc:
         fields = ", ".join(".".join(str(part) for part in issue["loc"]) for issue in exc.errors())
         raise ConfigurationError(f"Invalid settings in {profile}: {fields}") from None
-    except (OSError, UnicodeError, SettingsError) as exc:
-        raise ConfigurationError(f"Could not load settings for {profile}") from exc
+    except (OSError, UnicodeError, SettingsError):
+        raise ConfigurationError(f"Could not load settings for {profile}") from None
+
+    if settings.judge_llm is None and isinstance(values.get("judge_llm"), dict):
+        # An explicit YAML section must be complete after environment overrides are merged.
+        raise ConfigurationError(
+            f"Invalid settings in {profile}: judge_llm.provider, judge_llm.model"
+        )
 
     settings.paths = PathSettings(
         corpus_dir=root / settings.paths.corpus_dir,

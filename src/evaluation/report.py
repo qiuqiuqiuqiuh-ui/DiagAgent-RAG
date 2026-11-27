@@ -45,6 +45,9 @@ def render_markdown(report: EvaluationReport) -> str:
             + " | ".join("—" if value is None else f"{value:.4f}" for value in values)
             + " |"
         )
+    judge_samples = [mode.metrics.judge_samples for mode in report.modes]
+    if any(judge_samples) or "judge" in report.providers:
+        lines.append("| Judge samples | " + " | ".join(map(str, judge_samples)) + " |")
     lines.extend(
         [
             "",

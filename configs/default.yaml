@@ -11,6 +11,7 @@ ingestion:
 llm:
   provider: mock
   model: mock-llm-v1
+# judge_llm is optional. Leave it unset for offline evaluation without --judge.
 embedding:
   provider: mock
   model: mock-hash-v1

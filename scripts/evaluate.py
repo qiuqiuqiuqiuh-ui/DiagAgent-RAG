@@ -22,11 +22,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--dataset", type=Path, default=Path("data/eval/golden_smoke.jsonl"))
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument(
-        "--judge", action="store_true", help="score answered cases with the live LLM"
+        "--judge", action="store_true", help="score answered cases with the configured live judge"
+    )
+    parser.add_argument(
+        "--require-heterogeneous-judge",
+        action="store_true",
+        help="require --judge to use a model different from the answer model",
+    )
+    parser.add_argument(
+        "--save-answers",
+        action="store_true",
+        help="save each mode's frozen answers, cited chunks and traces in the reports directory",
     )
     args = parser.parse_args(argv)
     if args.top_k < 1:
         parser.error("--top-k must be positive")
+    if args.require_heterogeneous_judge and not args.judge:
+        parser.error("--require-heterogeneous-judge requires --judge")
 
     root = args.project_root or Path.cwd()
     try:
@@ -35,7 +47,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         dataset = load_dataset(root / args.dataset)
         print(f"Evaluating {dataset.name}: {len(dataset.cases)} cases per mode", flush=True)
         report = evaluate(
-            settings, dataset, top_k=args.top_k, judge=args.judge, on_mode_complete=_print_progress
+            settings,
+            dataset,
+            top_k=args.top_k,
+            judge=args.judge,
+            require_heterogeneous_judge=args.require_heterogeneous_judge,
+            save_answers_dir=settings.paths.reports_dir if args.save_answers else None,
+            on_mode_complete=_print_progress,
         )
         json_path, markdown_path = write_reports(report, settings.paths.reports_dir)
     except (DiagAgentError, OSError) as exc:
@@ -47,6 +65,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     print(f"JSON report: {json_path}")
     print(f"Markdown report: {markdown_path}")
+    if args.save_answers:
+        print(f"Frozen answers: {settings.paths.reports_dir} ({len(report.modes)} mode files)")
     return 0
 
 

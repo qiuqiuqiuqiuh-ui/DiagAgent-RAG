@@ -15,6 +15,13 @@ llm:
   base_url: https://api.openai.com/v1
   temperature: 0
   json_mode: true
+# Uncomment to use a separate judge with scripts/evaluate.py --judge.
+# judge_llm:
+#   provider: openai_compatible
+#   model: your-judge-model
+#   base_url: https://api.openai.com/v1
+#   temperature: 0
+#   json_mode: true
 embedding:
   provider: sentence_transformers
   model: sentence-transformers/all-MiniLM-L6-v2

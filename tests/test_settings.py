@@ -1,7 +1,10 @@
 from pathlib import Path
+from traceback import format_exception
 
 import pytest
+from pydantic import SecretStr
 
+from src.api.cache import profile_hash
 from src.core.exceptions import ConfigurationError
 from src.core.settings import load_settings
 
@@ -13,6 +16,7 @@ def test_default_and_colab_profiles() -> None:
     assert default.domain.language == "en"
     assert default.paths.corpus_dir == PROJECT_ROOT / "data" / "raw"
     assert default.ingestion.chunk_overlap < default.ingestion.chunk_size
+    assert default.judge_llm is None
     assert (default.llm.provider, default.embedding.provider, default.reranker.provider) == (
         "mock",
         "mock",
@@ -26,8 +30,97 @@ def test_default_and_colab_profiles() -> None:
     assert colab.paths.cache_file.as_posix().endswith("/content/diagagent-cache/semantic.sqlite3")
     assert colab.llm.provider == "openai_compatible"
     assert colab.llm.api_key is None
+    assert colab.judge_llm is None
     assert colab.embedding.dimension == 384
     assert colab.embedding.device == colab.reranker.device == "cuda"
+
+
+def test_judge_yaml_and_env_overrides_preserve_diagnostic_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    default_profile = PROJECT_ROOT / "configs" / "default.yaml"
+    baseline = load_settings(default_profile, env_file=None)
+    profile = tmp_path / "judge.yaml"
+    profile.write_text(
+        default_profile.read_text(encoding="utf-8")
+        + "\njudge_llm:\n  provider: openai_compatible\n  model: yaml-judge\n",
+        encoding="utf-8",
+    )
+    configured = load_settings(profile, env_file=None)
+    assert configured.judge_llm is not None
+    assert configured.judge_llm.model == "yaml-judge"
+
+    secret = "test-judge-secret"
+    monkeypatch.setenv("DIAGAGENT_JUDGE_LLM__API_KEY", secret)
+    with_key = load_settings(profile, env_file=None).judge_llm
+    assert with_key is not None and with_key.model == "yaml-judge"
+    assert isinstance(with_key.api_key, SecretStr) and with_key.api_key.get_secret_value() == secret
+
+    overrides = {
+        "PROVIDER": "openai_compatible",
+        "MODEL": "env-judge",
+        "BASE_URL": "https://judge.example.test/v1",
+        "API_KEY": secret,
+        "TEMPERATURE": "0.2",
+        "JSON_MODE": "true",
+    }
+    for name, value in overrides.items():
+        monkeypatch.setenv(f"DIAGAGENT_JUDGE_LLM__{name}", value)
+    from_yaml = load_settings(profile, env_file=None)
+    from_env = load_settings(default_profile, env_file=None)
+    judge = from_yaml.judge_llm
+    assert judge is not None and judge == from_env.judge_llm
+    assert judge.provider == "openai_compatible" and judge.model == "env-judge"
+    assert str(judge.base_url) == overrides["BASE_URL"]
+    assert judge.temperature == 0.2 and judge.json_mode is True
+    assert isinstance(judge.api_key, SecretStr)
+    assert judge.api_key.get_secret_value() == overrides["API_KEY"]
+    assert overrides["API_KEY"] not in repr(from_yaml) + from_yaml.model_dump_json()
+    assert profile_hash(baseline) == profile_hash(configured) == profile_hash(from_env)
+
+
+@pytest.mark.parametrize("profile", ["default.yaml", "colab.yaml"])
+@pytest.mark.parametrize("source", ["env", "dotenv"])
+def test_standalone_judge_key_keeps_the_default_judge_unset(
+    profile: str, source: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    name = "DIAGAGENT_JUDGE_LLM__API_KEY"
+    if source == "env":
+        monkeypatch.setenv(name, "test-judge-key")
+    else:
+        (tmp_path / ".env").write_text(f"{name}=test-judge-key\n", encoding="utf-8")
+
+    settings = load_settings(PROJECT_ROOT / "configs" / profile, project_root=tmp_path)
+    assert settings.judge_llm is None
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "missing"),
+    [
+        ("MODEL", "test-judge", "provider"),
+        ("PROVIDER", "openai_compatible", "model"),
+        ("BASE_URL", "https://judge.example.test/v1", "provider"),
+    ],
+)
+def test_standalone_key_does_not_hide_an_incomplete_environment_judge(
+    field: str, value: str, missing: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DIAGAGENT_JUDGE_LLM__API_KEY", "test-judge-key")
+    monkeypatch.setenv(f"DIAGAGENT_JUDGE_LLM__{field}", value)
+    with pytest.raises(ConfigurationError, match=rf"judge_llm\.{missing}"):
+        load_settings(project_root=PROJECT_ROOT, env_file=None)
+
+
+@pytest.mark.parametrize("section", ["{}", "{api_key: yaml-test-key}"])
+def test_explicit_incomplete_judge_yaml_is_rejected_with_standalone_key(
+    section: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    profile = tmp_path / "judge.yaml"
+    default = (PROJECT_ROOT / "configs" / "default.yaml").read_text(encoding="utf-8")
+    profile.write_text(f"{default}\njudge_llm: {section}\n", encoding="utf-8")
+    monkeypatch.setenv("DIAGAGENT_JUDGE_LLM__API_KEY", "test-judge-key")
+    with pytest.raises(ConfigurationError, match=r"judge_llm\.provider"):
+        load_settings(profile, env_file=None)
 
 
 def test_environment_overrides_dotenv_and_yaml(
@@ -74,6 +167,15 @@ def test_rejects_invalid_profiles(tmp_path: Path, contents: str, error: str) -> 
 def test_rejects_missing_profile(tmp_path: Path) -> None:
     with pytest.raises(ConfigurationError, match="Could not read YAML profile"):
         load_settings(project_root=tmp_path, env_file=None)
+
+
+def test_malformed_judge_yaml_does_not_expose_credentials_in_traceback(tmp_path: Path) -> None:
+    secret = "test-malformed-yaml-key"
+    profile = tmp_path / "malformed.yaml"
+    profile.write_text(f"judge_llm: {{api_key: {secret}, model: [x}}", encoding="utf-8")
+    with pytest.raises(ConfigurationError, match="Could not read YAML profile") as failure:
+        load_settings(profile, env_file=None)
+    assert secret not in "".join(format_exception(failure.value))
 
 
 @pytest.mark.parametrize("value", ["", " \t "])

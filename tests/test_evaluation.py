@@ -1,5 +1,6 @@
 import ast
 import json
+import runpy
 from collections.abc import Sequence
 from dataclasses import replace
 from math import log2
@@ -11,10 +12,11 @@ from src.agents.citations import validate_citations
 from src.agents.schemas import DiagnosticRequest, DiagnosticResult, FaultCodeFinding
 from src.agents.tools import DiagnosticTools
 from src.core.embedding import create_embedding_client
-from src.core.exceptions import CorpusError, ModelClientError
+from src.core.exceptions import ConfigurationError, CorpusError, ModelClientError
 from src.core.llm import ChatMessage, MockLLMClient
-from src.core.settings import load_settings
+from src.core.settings import LLMSettings, load_settings
 from src.evaluation.dataset import EvalCase, load_dataset
+from src.evaluation.frozen import FrozenModeReport
 from src.evaluation.metrics import score_case, score_ranking, summarize
 from src.evaluation.report import render_markdown, write_reports
 from src.evaluation.runner import (
@@ -22,6 +24,7 @@ from src.evaluation.runner import (
     _RecordingRetriever,
     evaluate,
     judge_faithfulness,
+    judge_prompt_sha256,
 )
 from src.ingestion.corpus import read_corpus
 from src.ingestion.pipeline import build_index
@@ -29,6 +32,12 @@ from src.ingestion.schemas import Chunk
 from src.retrieval.schemas import SearchHit
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_judge_prompt_matches_phase_b() -> None:
+    assert (
+        judge_prompt_sha256() == "9b72030702cfaede7c096ebc8ba9a0c959ef138fe637105024eeedbcbddb11ef"
+    )
 
 
 def test_golden_dataset_sizes_labels_and_tool_expectations() -> None:
@@ -262,8 +271,19 @@ def test_evaluation_preserves_full_report_when_one_judge_call_fails(
     class ScriptedLiveClient(MockLLMClient):
         provider = "openai_compatible"
 
-    client = ScriptedLiveClient(model=settings.llm.model, responder=respond)
-    monkeypatch.setattr("src.evaluation.runner.create_llm_client", lambda config: client)
+        def close(self) -> None:
+            closed.append(self)
+
+    clients = []
+    closed = []
+
+    def create_client(config: LLMSettings) -> ScriptedLiveClient:
+        assert config is settings.llm
+        client = ScriptedLiveClient(model=config.model, responder=respond)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr("src.evaluation.runner.create_llm_client", create_client)
     progress: list[tuple[str, int, float]] = []
     report = evaluate(
         settings,
@@ -277,12 +297,15 @@ def test_evaluation_preserves_full_report_when_one_judge_call_fails(
     reloaded = EvaluationReport.model_validate_json(json_path.read_bytes())
     assert markdown_path.is_file()
     assert len(reloaded.modes) == 4 and all(len(mode.cases) == 2 for mode in reloaded.modes)
+    assert len(clients) == 2 and clients[0] is not clients[1] and closed == clients[::-1]
+    assert reloaded.providers["judge"] == f"openai_compatible:{settings.llm.model}"
     assert judge_calls == 8
     assert [mode.metrics.judge_samples for mode in reloaded.modes] == [1, 2, 2, 2]
     assert reloaded.modes[0].cases[0].faithfulness is None
     assert all(mode.metrics.faithfulness == pytest.approx(0.9) for mode in reloaded.modes)
     assert all(mode.metrics.retrieval_attempted_samples == 2 for mode in reloaded.modes)
     assert "| Retrieval attempts (gold cases) | 2 | 2 | 2 | 2 |" in render_markdown(reloaded)
+    assert "| Judge samples | 1 | 2 | 2 | 2 |" in render_markdown(reloaded)
     legacy = reloaded.model_dump()
     for mode in legacy["modes"]:
         del mode["metrics"]["retrieval_attempted_samples"]
@@ -294,6 +317,115 @@ def test_evaluation_preserves_full_report_when_one_judge_call_fails(
     assert all(count == 2 and elapsed >= 0.0 for _, count, elapsed in progress)
     failures = [record for record in caplog.records if record.message == "evaluation.judge_failed"]
     assert len(failures) == 1 and failures[0].event_fields["status_code"] == 429
+
+
+def test_evaluation_uses_only_the_independent_judge_for_scoring(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = load_settings(project_root=ROOT, env_file=None)
+    settings.paths.index_dir = tmp_path / "index"
+    dataset = load_dataset(ROOT / "data" / "eval" / "golden_smoke.jsonl")
+    with pytest.raises(ConfigurationError, match="requires judging"):
+        evaluate(settings, dataset, require_heterogeneous_judge=True)
+    with pytest.raises(ConfigurationError, match="live LLM"):
+        evaluate(settings, dataset, judge=True)
+    settings.judge_llm = LLMSettings(
+        provider="openai_compatible", model=settings.llm.model.upper(), api_key="judge-test-key"
+    )
+    with pytest.raises(ConfigurationError, match="must differ"):
+        evaluate(settings, dataset, judge=True, require_heterogeneous_judge=True)
+    settings.judge_llm.model = "independent-judge"
+    with create_embedding_client(settings.embedding) as embedder:
+        build_index(settings, embedder)
+    closed = []
+    calls = []
+    configs = []
+
+    def respond(messages: Sequence[ChatMessage]) -> str:
+        assert messages[0].content.startswith('Return a JSON object {"faithfulness"')
+        calls.append(messages)
+        return '{"faithfulness":0.8}'
+
+    class AnswerClient(MockLLMClient):
+        def close(self) -> None:
+            closed.append(self.model)
+
+    class JudgeClient(AnswerClient):
+        provider = "openai_compatible"
+
+    def create_client(config: LLMSettings) -> MockLLMClient:
+        configs.append(config)
+        if config is settings.judge_llm:
+            return JudgeClient(config.model, responder=respond)
+        return AnswerClient(config.model)
+
+    monkeypatch.setattr("src.evaluation.runner.create_llm_client", create_client)
+    report = evaluate(settings, dataset, judge=True, require_heterogeneous_judge=True)
+    assert configs == [settings.llm, settings.judge_llm]
+    assert closed == [settings.judge_llm.model, settings.llm.model]
+    assert report.run_mode == "mock"
+    assert report.providers["judge"] == "openai_compatible:independent-judge"
+    assert "judge-test-key" not in report.model_dump_json() + render_markdown(report)
+    assert len(calls) == sum(mode.metrics.judge_samples for mode in report.modes) > 0
+
+
+def test_evaluate_cli_saves_replayable_answers_for_every_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index_dir = tmp_path / "index"
+    reports_dir = tmp_path / "reports"
+    monkeypatch.setenv("DIAGAGENT_PATHS__INDEX_DIR", str(index_dir))
+    monkeypatch.setenv("DIAGAGENT_PATHS__REPORTS_DIR", str(reports_dir))
+    monkeypatch.setenv("DIAGAGENT_PATHS__CORPUS_DIR", str(ROOT / "data" / "raw"))
+    settings = load_settings(project_root=ROOT, env_file=None)
+    with create_embedding_client(settings.embedding) as embedder:
+        build_index(settings, embedder)
+    dataset_path = ROOT / "data" / "eval" / "golden_smoke.jsonl"
+    dataset = load_dataset(dataset_path)
+    evaluate_main = runpy.run_path(str(ROOT / "scripts" / "evaluate.py"))["main"]
+    with pytest.raises(SystemExit) as failure:
+        evaluate_main(["--require-heterogeneous-judge"])
+    assert failure.value.code == 2
+    args = [
+        "--project-root",
+        str(tmp_path),
+        "--config",
+        str(ROOT / "configs" / "default.yaml"),
+        "--dataset",
+        str(dataset_path),
+        "--save-answers",
+    ]
+    assert evaluate_main(args) == 0
+    frozen = [
+        FrozenModeReport.model_validate_json(path.read_bytes())
+        for path in reports_dir.glob("*_answers.json")
+    ]
+    assert {report.mode for report in frozen} == {
+        "dense_only",
+        "bm25_only",
+        "hybrid_rrf",
+        "hybrid_rerank",
+    }
+    assert len({report.run_id for report in frozen}) == 1
+    assert len({report.index_version for report in frozen}) == 1
+    corpus = read_corpus(settings.paths.corpus_dir, settings.ingestion)
+    chunks = {chunk.chunk_id: chunk for chunk in corpus.chunks}
+    for report in frozen:
+        assert report.model == settings.llm.model and report.dataset_sha256 == dataset.sha256
+        assert [(row.case_id, row.expected_status) for row in report.rows] == [
+            (case.id, case.expected_status) for case in dataset.cases
+        ]
+        assert any(row.result.tool_findings for row in report.rows)
+        for row in report.rows:
+            assert row.result.trace is not None and row.result.trace.nodes
+            assert all(chunks[chunk.chunk_id] == chunk for chunk in row.cited_evidence)
+            if row.result.status == "answered":
+                assert (
+                    validate_citations(row.result.answer, row.cited_evidence)
+                    == row.result.citations
+                )
+            else:
+                assert not row.cited_evidence
 
 
 def test_colab_notebook_matches_script_and_has_clean_cells() -> None:

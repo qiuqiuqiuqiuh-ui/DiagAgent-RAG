@@ -444,9 +444,8 @@ Replace `<run_id>` with the generated timestamp and configure `judge_llm` before
 replay. You can also pass `--model` and `--base-url` together with the process
 environment variable `DIAGAGENT_JUDGE_LLM__API_KEY`. A standalone key leaves the
 dedicated judge disabled in profiles without a `judge_llm` section. Repeat
-`--case-id` to score chosen answered cases. For an archived Phase B smoke report
-with citation metadata only, use `--evidence-report` to supply reports with chunk
-text from the same index version. `--paired` scores each answer with and without
+`--case-id` to score chosen answered cases. For older frozen reports containing citation metadata without chunk text, use
+`--evidence-report` to supply reports with chunk text from the same index version. `--paired` scores each answer with and without
 structured request context. Replay records each arm's valid sample count and computes
 paired deltas only for cases with two valid scores. A failed judge call yields a
 nonzero exit status and remains visible in the JSON. Use a new output path.
@@ -533,16 +532,9 @@ connectivity probe returned reasoning output.
 
 Run `20261126T111043719954Z` evaluated the same four retrieval modes on 54
 labeled cases per mode, using `top_k=5`, the index above, and the judge disabled.
-This full benchmark used `llm-critic-v2`, before the critic's evidence
-requirements were tightened. The Drive profile used `deepseek-v4.1-flash`
-through the Qianwen OpenAI-compatible gateway. The embedding and reranking
-models and the Tesla T4 environment matched the run above. The candidate
-dataset SHA-256 was
-`21ec517f4455a60faa3e8bf1c2219af3506a42976fec24acd51e960425382dd1`.
-The Drive profile SHA-256 was
-`240d3cae7deb282e4a9fa974e60c0895d916f5754c304f129c2c04e2cbcd8d16`.
-The six-file runtime patch used for this run had SHA-256
-`e62e88bc13fb310f1715d78ee9261fdbb64946d86ef9bdba590ac7f0b29745e8`.
+This benchmark used `llm-critic-v2` with `deepseek-v4.1-flash` through the
+Qianwen OpenAI-compatible gateway, matching the Tesla T4 environment and
+embedding/reranking models above.
 
 | Metric | `dense_only` | `bm25_only` | `hybrid_rrf` | `hybrid_rerank` |
 |---|---:|---:|---:|---:|
@@ -559,97 +551,108 @@ The six-file runtime patch used for this run had SHA-256
 | P50 latency (ms) | 7,847.34 | 7,530.94 | 6,806.97 | 7,393.68 |
 | P95 latency (ms) | 23,478.55 | 17,731.85 | 15,908.14 | 20,508.56 |
 
-All 186 answered results passed the citation ID and metadata check. Semantic
-faithfulness was unmeasured. A companion Colab `.telemetry.json` file recorded
-674 schema-valid policy calls, zero schema rejections and zero route retries.
-The four mode runs took 30.8 minutes in total. The rewritten `bench-19` was
-answered in all four modes. Dense-only and BM25-only both answered `bench-47`,
-which expects `insufficient_evidence` because the corpus lacks the authorized
-MX-200 terminal torque. The archived report preserves status and citation IDs,
-so the exact answer text is unknown. BM25-only and Hybrid Rerank also mapped
-`bench-10` and `bench-26` to `parameter_lookup`.
+All 186 answered results passed citation validation with zero schema rejections
+or route retries. Dense-only and BM25-only both answered `bench-47`, which
+expects `insufficient_evidence` because the corpus lacks the authorized MX-200
+terminal torque.
 
-The candidate changed the routing policy, LLM, gateway, and `bench-19`
-wording. Isolating the routing policy's effect requires a paired run on
-the unchanged cases with the same model and gateway.
+#### Critic policy progression (`llm-critic-v3` → `llm-critic-v4`)
 
-#### Targeted follow-up
+Tightening the critic in `llm-critic-v3` eliminated the false answers on
+`bench-47` across all four modes (`0/6` false answers on insufficient-evidence
+cases), while introducing one false refusal on qualitative case `bench-27`
+(`45/46` answerable cases answered).
 
-Follow-up run `20261126T114134427256Z` used the tightened critic and cache policy
-`llm-critic-v3` on the same Qianwen model and index. The SHA-256 of
-`src/agents/policy.py` used in this run was
-`6d3a1e004c3c9289df14d90a17c5ac32723a5741aff8a0537b291179da1bf3cf`.
-The raw `abstention`, `paired_routes`, and `judge_smoke` JSON reports are
-archived locally in the Git-ignored `reports/generated/` directory.
+In `llm-critic-v4` (run `20261127T022823191425Z`, same model, dataset, index,
+and `top_k=5`), qualitative guidance rules were clarified:
 
-`bench-47`, `bench-48`, and `bench-52` each returned `insufficient_evidence`
-in all four retrieval modes across two runs per mode (24/24).
-The eight `bench-47` responses reported the missing torque
-specification and provided no torque value.
+- Every retrieval mode correctly answered all **46/46** answerable cases,
+  abstained on all **6/6** insufficient-evidence cases, and rejected both
+  **2/2** out-of-scope cases (**54/54** final status accuracy).
+- All **184/184** answered results across the four modes passed citation
+  validation.
+- Independent heterogeneous judge scoring (`qwen-plus-2025-12-01`) on all 46
+  frozen `hybrid_rrf` answers achieved a mean faithfulness of **0.9826**
+  (42 scores of `1.0`, 4 scores of `0.8`, zero judge errors).
 
-On the 53 unchanged benchmark cases, the legacy and candidate router prompts
-scored 42/53 and 52/53, respectively, using the same model and gateway and
-one policy-layer attempt per prompt. Both were correct on 42 cases, only the
-candidate was correct on 10, and both missed `bench-26`. This comparison
-measures first-pass routing on these cases.
+## Operations details
 
-In a separate `hybrid_rrf` smoke, all 15 final statuses matched the reference.
-The same model scored the 12 answered cases, with mean faithfulness of 0.9917
-and no judge errors. Abstentions and out-of-scope cases received no score.
+- **Probes and readiness**: Use `GET /health/live` for liveness and
+  `GET /health/ready` for readiness (returns `503` until a compatible index is
+  loaded). `GET /health` always returns `200` with `status: "ok" | "not_ready"`.
+- **Authentication and Demo UI**: Set `DIAGAGENT_API__API_KEY` and
+  `DIAGAGENT_API__ADMIN_API_KEY` to separate diagnostic traffic (`/v1/diagnose`,
+  `/v1/meta`, `/v1/chunks`, `/v1/chunks/*`) from admin routes (`/v1/ingest`,
+  `/metrics`). The bundled Demo UI accepts session-scoped keys (stored only in
+  `sessionStorage` / memory) when authentication is enabled, or can be disabled
+  completely on API-only deployments via `DIAGAGENT_API__ENABLE_DEMO_UI=false`.
+- **Reverse proxy and rate limiting**: Rate limiting (`api.rate_limit_rpm`) uses
+  process-local per-peer and per-role token buckets and ignores untrusted
+  `X-Forwarded-For` headers by default. Behind a trusted TLS reverse proxy, pass
+  `--forwarded-allow-ips <proxy_ip>` to `scripts/run_api.py` so limits track
+  real client IPs.
+- **Observability**: Every response echoes `X-Request-ID` and attaches it to
+  structured JSON logs. When `api.enable_metrics` is `true`, `GET /metrics`
+  exposes Prometheus counters, cache hit rate, retry distribution, index
+  readiness/chunk count, and `diagagent_diagnose_duration_seconds` (recorded on
+  successful `200` `/v1/diagnose` responses so `401`/`422`/`429`/`503` errors do
+  not skew latency percentiles).
+- **Storage, pruning, and container profiles**: Keep the SQLite semantic cache
+  (`paths.cache_file`, WAL mode) on local disk—not NFS/Drive. Set
+  `ingestion.prune_generations_on_ingest: true` (default in
+  `configs/production.yaml`) to retain the active generation plus one historical
+  generation for rollback. The container image bundles both
+  `configs/production.yaml` and `configs/production_bilingual.yaml` under
+  `/app/configs/`.
+- **Evidence lookup**: Use `GET /v1/chunks?chunk_id=<url-encoded-id>` (used by
+  the Demo UI) for lossless lookup with non-ASCII or space-containing filenames;
+  `GET /v1/chunks/{chunk_id:path}` remains available for backward compatibility.
 
-#### Full `llm-critic-v3` regression
+## Customization guide
 
-Run `20261126T123320700668Z` evaluated 54 cases per mode with the same
-Qianwen gateway, model, dataset, index, and `top_k=5` as the v2 candidate.
-The optional judge was disabled. The four mode runs took 31.35 minutes in
-total. The v3 policy SHA-256 is recorded above.
+DiagAgent-RAG is structured as a reusable diagnostic template across three
+adoption levels (see [docs/CUSTOMIZATION.md](docs/CUSTOMIZATION.md) for the
+complete Chinese guide):
 
-| Outcome | Dense only | BM25 only | Hybrid RRF | Hybrid rerank |
-|---|---:|---:|---:|---:|
-| Correct final status (v2 → v3) | 53/54 → 53/54 | 53/54 → 53/54 | 54/54 → 53/54 | 54/54 → 53/54 |
-| Gold-answerable cases answered (v2 → v3) | 46/46 → 45/46 | 46/46 → 45/46 | 46/46 → 45/46 | 46/46 → 45/46 |
-| Gold evidence-insufficient cases answered in error (v2 → v3) | 1/6 → 0/6 | 1/6 → 0/6 | 0/6 → 0/6 | 0/6 → 0/6 |
-| v3 answers with valid citations | 45/45 | 45/45 | 45/45 | 45/45 |
+1. **Level 1 — Zero-code adaptation (~10 minutes)**:
+   - Copy `configs/production_bilingual.yaml` (Chinese/bilingual) or
+     `configs/production.yaml` (English) and set `domain.name`, `domain.language`
+     (`zh` automatically localizes workflow refusal, out-of-scope, escalation,
+     and retry copy as well as Demo UI presets), model providers, and paths.
+   - Replace `data/raw/` with your manuals (Markdown, text PDF, OCR Markdown
+     with `## Page N` headings) and rule tables (`fault_codes.csv`,
+     `sensor_thresholds.json`), or set `rules.allow_missing_rule_tables: true`
+     for a manual-only corpus.
+   - Run `scripts/validate_corpus.py`, `scripts/ingest.py`, `scripts/evaluate.py`,
+     and `scripts/check_eval_gate.py` (append `--allow-no-tools` for manual-only
+     corpora).
+2. **Level 2 — Light business extensions**:
+   - Extend `FaultCodeRule` / `SensorThresholdRule` in `src/agents/schemas.py`
+     and evaluation logic in `src/agents/tools.py` (e.g. bilateral normal ranges).
+   - Register additional units in `_SENSOR_UNITS` in `src/agents/tools.py`;
+     `src/agents/citations.py` automatically shares `KNOWN_SENSOR_UNITS`.
+   - Tune routing/synthesis/critic prompts in `src/agents/policy.py` and bump the
+     policy identifier in `src/api/cache.py` (`profile_hash`) when prompt
+     semantics change.
+3. **Level 3 — Deep system integration**:
+   - Add read-only adapters for SCADA, time-series databases, or ticketing
+     systems in `src/agents/tools.py` and register new `ToolFinding` variants in
+     `src/agents/schemas.py`.
+   - Attach a LangGraph `Checkpointer` in `src/agents/workflow.py` for multi-turn
+     diagnostics (and scope or bypass single-turn semantic caching accordingly).
+   - Swap `AccessControl` in `src/api/security.py` to integrate JWT/OAuth2 or
+     gateway SSO.
 
-`bench-47` now returns `insufficient_evidence` in all four modes.
-`bench-27` is the only new status regression and prevents passing the
-zero-false-refusal criterion. It returns `insufficient_evidence` in every
-mode despite retrieving both annotated sections in the first pass and
-using both workflow retries. The question permits a qualitative reading
-of the manual, while the final missing-evidence lists ask for duty-point
-values and field observations. The run saved final answers and node
-traces. Antigravity independently verified the artifacts and reproduced all
-216 paired comparisons. A 12-run follow-up with the same v3 policy and
-index reproduced three refusals in four `bench-27` runs. All ten drafts
-sent to the critic for this case cited both annotated sections and
-explained the qualitative comparison. Nine critic decisions asked for
-duty-point values and field observations before approving an answer.
-The v4 candidate clarifies the evidence requirement for qualitative
-guidance. In the 12-run v4 follow-up, all four `bench-27` runs answered on
-the first attempt. Both answerable controls and all six insufficient-evidence
-controls returned the expected status. First-pass rankings matched v3
-in all 12 runs.
+### File quick-reference
 
-#### Full `llm-critic-v4` regression
-
-Run `20261127T022823191425Z` used the same model, dataset, index, and
-`top_k=5` as v3. The cache profile uses `llm-critic-v4`, and the SHA-256
-of `src/agents/policy.py` is
-`815441297333e96087e779cf5306ed68ea0741b241542c2143e6871fcf432e08`.
-Every retrieval mode correctly answered all 46 answerable
-cases, abstained on all six insufficient-evidence cases, and identified
-both out-of-scope cases. The four status changes from v3 were all
-`bench-27` recoveries. First-pass rankings matched v3 across all 216
-case-mode pairs. All 184 answers passed citation validation. `bench-26`
-retained its routing mismatch across all four modes, and `bench-10` had a
-routing mismatch in Dense only. Both cases answered in all modes. The
-four mode runs took 28.45 minutes in total. Independent Judge scoring
-used `qwen-plus-2025-12-01` on the 46 frozen Hybrid RRF answers with
-their original requests, cited evidence, and tool findings. All 46
-received a score, with a mean faithfulness of 0.9826. There were 42 scores
-of 1.0 and four of 0.8. `bench-27` received 1.0. The two `smoke-06` runs,
-with and without the structured request, each received 1.0.
-
-`python scripts/verify_e2e.py` is the offline Antigravity entry point. It
-uses temporary index, cache and report paths and exercises ingestion, the
-manifest, the FastAPI request paths and all four Mock evaluation modes.
+| Customization target | Files |
+|---|---|
+| Models, language, paths, rate limits, Demo UI toggle | `configs/*.yaml`, `.env`, `src/core/settings.py` |
+| Manuals, OCR Markdown, fault codes, sensor thresholds | `data/raw/*` (no code changes) |
+| Parsing, preflight, chunk separators, CJK/code tokenizer | `src/ingestion/parsers.py`, `src/ingestion/preflight.py`, `src/ingestion/chunking.py`, `src/core/tokenizer.py` |
+| Dense/BM25/RRF retrieval and reranking | `src/retrieval/dense.py`, `src/retrieval/bm25.py`, `src/retrieval/hybrid.py` |
+| Deterministic rules, units, prompts, workflow localization | `src/agents/schemas.py`, `src/agents/tools.py`, `src/agents/policy.py`, `src/agents/workflow.py` |
+| API endpoints, auth, semantic cache, Prometheus metrics | `src/api/app.py`, `src/api/security.py`, `src/api/cache.py`, `src/api/metrics.py` |
+| Demo UI layout, presets, auth panel, evidence drawer | `src/api/static/index.html`, `src/api/static/app.js`, `src/api/static/styles.css` |
+| Evaluation metrics, frozen judge replay, release gate | `src/evaluation/metrics.py`, `src/evaluation/runner.py`, `src/evaluation/replay.py`, `src/evaluation/gate.py` |
+| Container image, proxy flags, CI checks | `Dockerfile`, `docker-compose.yml`, `scripts/run_api.py`, `.github/workflows/ci.yml` |

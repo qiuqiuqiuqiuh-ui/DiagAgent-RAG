@@ -34,3 +34,84 @@ jobs:
         run: python -c "import json; json.load(open('notebooks/colab_gpu_pipeline.ipynb', encoding='utf-8'))"
       - name: Offline end-to-end verification
         run: python scripts/verify_e2e.py
+
+  docker-smoke:
+    name: Docker smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      COMPOSE_PROJECT_NAME: diagagent-smoke
+      DIAGAGENT_API__API_KEY: ci-user-key
+      DIAGAGENT_API__ADMIN_API_KEY: ci-admin-key
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Build and start the service
+        shell: bash
+        run: |
+          printf 'DIAGAGENT_API__API_KEY=%s\nDIAGAGENT_API__ADMIN_API_KEY=%s\n' \
+            "$DIAGAGENT_API__API_KEY" "$DIAGAGENT_API__ADMIN_API_KEY" > .env
+          docker compose up --build --wait --wait-timeout 120
+      - name: Verify health, authorization, mounts and persistence
+        shell: bash
+        run: |
+          set -u
+          base=http://127.0.0.1:8000
+          body=$(mktemp)
+          trap 'rm -f "$body"' EXIT
+          user_auth=(--header "X-API-Key: $DIAGAGENT_API__API_KEY")
+          admin_auth=(--header "Authorization: Bearer $DIAGAGENT_API__ADMIN_API_KEY")
+          diagnosis=(--header 'Content-Type: application/json'
+            --data '{"query":"What does VFD-OC3 mean?","equipment_id":"DRV-300"}')
+
+          expect_status() {
+            local expected=$1 endpoint=$2 actual
+            shift 2
+            actual=$(curl --silent --show-error --max-time 30 --output "$body" \
+              --write-out '%{http_code}' "$@" "$base$endpoint")
+            if [[ "$actual" != "$expected" ]]; then
+              printf '%s returned %s, expected %s\n' "$endpoint" "$actual" "$expected" >&2
+              cat "$body" >&2
+              return 1
+            fi
+          }
+
+          test "$(docker compose exec -T api id -u)" = 10001
+          test "$(docker compose exec -T api id -g)" = 10001
+          container=$(docker compose ps --quiet api)
+          mounts=$(docker inspect --format '{{range .Mounts}}{{println .Destination .RW}}{{end}}' "$container")
+          for mount in '/app/data/raw false' '/app/configs false' '/app/data/index true' '/app/data/cache true'; do
+            grep -Fx "$mount" <<< "$mounts"
+          done
+          expect_status 200 /health/live
+          expect_status 503 /health/ready
+          expect_status 401 /v1/ingest --request POST
+          expect_status 403 /v1/ingest --request POST "${user_auth[@]}"
+          expect_status 200 /v1/ingest --request POST "${admin_auth[@]}"
+          index_version=$(jq -er '.index_version | select(length > 0)' "$body")
+          expect_status 200 /health/ready
+          jq -e --arg version "$index_version" '.status == "ok" and .index_version == $version' "$body"
+          expect_status 200 /v1/diagnose "${user_auth[@]}" "${diagnosis[@]}"
+          jq -e '.status == "answered" and .cache_hit == false' "$body"
+          expect_status 200 /v1/diagnose "${user_auth[@]}" "${diagnosis[@]}"
+          jq -e '.status == "answered" and .cache_hit == true' "$body"
+          docker compose exec -T api test -s /app/data/index/manifest.json
+          docker compose exec -T api test -s /app/data/cache/semantic.sqlite3
+          expect_status 403 /metrics "${user_auth[@]}"
+          expect_status 200 /metrics "${admin_auth[@]}"
+          grep -Fx 'diagagent_cache_requests_total{outcome="hit"} 1' "$body"
+          grep -Fx 'diagagent_cache_requests_total{outcome="miss"} 1' "$body"
+
+          docker compose restart api
+          docker compose up --no-recreate --wait --wait-timeout 120 api
+          expect_status 200 /health/ready
+          jq -e --arg version "$index_version" '.status == "ok" and .index_version == $version' "$body"
+          expect_status 200 /v1/diagnose "${user_auth[@]}" "${diagnosis[@]}"
+          jq -e '.status == "answered" and .cache_hit == true' "$body"
+      - name: Show service logs on failure
+        if: failure()
+        run: docker compose logs --no-color api
+      - name: Remove smoke containers and volumes
+        if: always()
+        run: docker compose down --volumes

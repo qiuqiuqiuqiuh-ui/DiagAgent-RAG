@@ -5,7 +5,7 @@
 !.env.example
 data/index/
 *.sqlite*
-reports/generated/
+/reports/
 __pycache__/
 *.py[cod]
 .pytest_cache/

@@ -189,7 +189,8 @@ python scripts/evaluate.py --config configs/colab.yaml --dataset data/eval/golde
 The smoke set contains 15 cases, including three abstention or out-of-scope
 cases. The benchmark set contains 54 cases, including eight abstention or
 out-of-scope cases. Both sets use the shipped sample corpus. The runner writes
-timestamped JSON and Markdown under the configured reports directory.
+timestamped JSON and Markdown under the configured reports directory. The
+default local profile writes to the Git-ignored `reports/generated/`.
 Reports identify the dataset hash, index and model profile. They include
 Recall@K, MRR@K, NDCG@K, citation and tool metrics, routing and abstention
 accuracy, and P50/P95 workflow latency. Add `--judge` to a live run for
@@ -213,7 +214,6 @@ parameter their endpoint supports.
 The 2026-11-26 run evaluated all 54 cases in `golden_bench.jsonl` in each of
 the four retrieval modes (216 diagnoses). It reused the index verified in the
 15-case live smoke run, used `top_k=5`, and ran with the LLM judge disabled.
-[Full benchmark report](reports/benchmarks/20261126T082538306476Z_live_golden_bench.md).
 
 - Code commit `3710eab2e151da04db2e330e5d6b7ddc30ec707f`.
 - Dataset SHA-256 `20e01b827fd435385b88d65d6311b333b305747a57562c875745ffc57e8ec43e`.
@@ -290,7 +290,6 @@ The Drive profile SHA-256 was
 `240d3cae7deb282e4a9fa974e60c0895d916f5754c304f129c2c04e2cbcd8d16`.
 The six-file runtime patch used for this run had SHA-256
 `e62e88bc13fb310f1715d78ee9261fdbb64946d86ef9bdba590ac7f0b29745e8`.
-[Candidate benchmark report](reports/benchmarks/20261126T111043719954Z_live_golden_bench.md).
 
 | Metric | `dense_only` | `bm25_only` | `hybrid_rrf` | `hybrid_rerank` |
 |---|---:|---:|---:|---:|
@@ -351,7 +350,6 @@ Run `20261126T123320700668Z` evaluated 54 cases per mode with the same
 Qianwen gateway, model, dataset, index, and `top_k=5` as the v2 candidate.
 The optional judge was disabled. The four mode runs took 31.35 minutes in
 total. The v3 policy SHA-256 is recorded above.
-[Full v3 benchmark report](reports/benchmarks/20261126T130453638391Z_live_golden_bench.md).
 
 | Outcome | Dense only | BM25 only | Hybrid RRF | Hybrid rerank |
 |---|---:|---:|---:|---:|
@@ -398,7 +396,6 @@ their original requests, cited evidence, and tool findings. All 46
 received a score, with a mean faithfulness of 0.9826. There were 42 scores
 of 1.0 and four of 0.8. `bench-27` received 1.0. The two `smoke-06` runs,
 with and without the structured request, each received 1.0.
-[Full v4 benchmark report](reports/benchmarks/20261127T025706075569Z_live_golden_bench.md).
 
 `python scripts/verify_e2e.py` is the offline Antigravity entry point. It
 uses temporary index, cache and report paths and exercises ingestion, the

@@ -156,8 +156,15 @@ Start the local service with the project's virtual environment active.
 python scripts/run_api.py
 ```
 
-Use a second PowerShell session to build the configured index and submit a
-diagnosis. `GET /health` reports `not_ready` until a compatible index is loaded.
+Open the [diagnostic demo](http://127.0.0.1:8000/) and select **Build index**
+if the index is not ready. Choose a preset or enter a request, then select
+**Run diagnosis**. Click an inline citation to see its source passage. Use
+**Fault code** followed by **Cache retest** to see a cold request and a cached
+response, or enable **Bypass cache** to run a fresh workflow with its trace.
+The same page works with the default offline Mock profile and with live profiles.
+
+You can also build the index and submit a diagnosis from PowerShell.
+`GET /health` reports `not_ready` until a compatible index is loaded.
 The [interactive API documentation](http://127.0.0.1:8000/docs) lists the full
 request and response schemas.
 
@@ -176,6 +183,10 @@ and sets `cache_hit` when reusing an answer. Keep the cache file on the
 local filesystem. Rebuild the index through the running service to publish
 a new snapshot for subsequent requests and remove cache rows for older index
 versions. The Colab profile keeps its SQLite file under `/content/diagagent-cache/`.
+
+For a CLI rebuild with cleanup, run `python scripts/ingest.py --prune-generations 1`
+to retain the active generation and the most recently modified historical
+generation. Set the count to `0` to retain only the active generation.
 
 ## Evaluation and Colab
 

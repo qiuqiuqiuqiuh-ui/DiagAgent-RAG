@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DiagAgent · Equipment Diagnostics</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/styles.css">
+  <script type="module" src="/static/app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner shell">
+      <a class="brand" href="/">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        DiagAgent<span class="brand-suffix">RAG</span>
+      </a>
+      <div class="system-status" aria-live="polite">
+        <span class="badge" id="mode">Connecting</span>
+        <span class="status-dot" id="index-status" data-status="pending">Checking index</span>
+        <span id="chunk-count"></span>
+        <button class="version" id="copy-version" type="button" hidden></button>
+      </div>
+      <button class="button secondary" id="build-index" type="button">Build index</button>
+    </div>
+  </header>
+
+  <main class="shell workspace">
+    <div class="page-heading">
+      <h1>Equipment diagnostics</h1>
+      <p id="domain">Industrial equipment fault diagnosis</p>
+    </div>
+    <p class="notice" id="system-notice" role="status" hidden></p>
+
+    <div class="workspace-grid">
+      <section class="panel request-panel" aria-labelledby="request-heading">
+        <h2 id="request-heading">Diagnostic request</h2>
+        <div class="preset-group" aria-label="Demo presets">
+          <button type="button" data-preset="fault" aria-pressed="false">Fault code</button>
+          <button type="button" data-preset="critical" aria-pressed="false">Critical sensor</button>
+          <button type="button" data-preset="cache" aria-pressed="false">Cache retest</button>
+          <button type="button" data-preset="missing" aria-pressed="false">Missing spec</button>
+          <button type="button" data-preset="scope" aria-pressed="false">Out of scope</button>
+        </div>
+        <p class="hint preset-note" id="preset-note" hidden></p>
+
+        <form id="diagnosis-form">
+          <label class="field" for="query">Question</label>
+          <textarea id="query" name="query" placeholder="Describe the fault, alarm, or maintenance question" required></textarea>
+
+          <div class="field-pair">
+            <div>
+              <label class="field" for="equipment">Equipment ID</label>
+              <input id="equipment" name="equipment_id" list="equipment-options" placeholder="e.g. DRV-300" autocomplete="off">
+              <datalist id="equipment-options"></datalist>
+            </div>
+            <div>
+              <label class="field" for="fault-code">Fault code</label>
+              <input id="fault-code" name="fault_code" list="fault-options" placeholder="e.g. VFD-OC3" autocomplete="off">
+              <datalist id="fault-options"></datalist>
+            </div>
+          </div>
+
+          <fieldset class="sensors">
+            <legend>Sensor readings</legend>
+            <div id="sensor-rows"></div>
+            <datalist id="sensor-options"></datalist>
+            <button class="button link-button" id="add-sensor" type="button">+ Add reading</button>
+          </fieldset>
+
+          <div class="toggles">
+            <label><input id="include-trace" name="include_trace" type="checkbox" checked> Include workflow trace</label>
+            <label><input id="bypass-cache" name="bypass_cache" type="checkbox"> Bypass cache</label>
+          </div>
+          <p class="notice" id="form-error" role="alert" hidden></p>
+          <button class="button primary" id="run-diagnosis" type="submit" disabled>Run diagnosis <span aria-hidden="true">→</span></button>
+        </form>
+      </section>
+
+      <section class="panel result-panel" aria-labelledby="result-heading" aria-busy="false">
+        <div class="panel-heading">
+          <h2 id="result-heading">Diagnosis result</h2>
+          <p class="hint result-state" id="result-state" role="status"></p>
+        </div>
+        <div class="empty-state" id="empty-result">
+          <div class="empty-mark" aria-hidden="true"><i></i><i></i><i></i></div>
+          <h3>Ready for a diagnostic request</h3>
+          <p id="empty-hint">Build the index to enable diagnosis.</p>
+        </div>
+
+        <div id="result" hidden>
+          <div class="result-summary">
+            <span class="badge" id="diagnosis-status"></span>
+            <span id="intent"></span>
+            <span class="badge" id="cache-state"></span>
+            <span class="elapsed" id="elapsed"></span>
+          </div>
+          <section class="result-section" aria-labelledby="answer-heading">
+            <h3 id="answer-heading">Answer</h3>
+            <div class="answer" id="answer"></div>
+          </section>
+          <section class="result-section" id="tool-section" aria-labelledby="tools-heading" hidden>
+            <h3 id="tools-heading">Tool findings</h3>
+            <div class="findings" id="tool-findings"></div>
+          </section>
+          <section class="result-section" id="refusal-section" aria-labelledby="follow-up-heading" hidden>
+            <h3 id="follow-up-heading">Next steps</h3>
+            <ul class="checklist" id="missing-aspects"></ul>
+            <p id="escalation" hidden></p>
+          </section>
+          <section class="result-section" id="trace-section" aria-labelledby="trace-heading" hidden>
+            <div class="trace-heading">
+              <h3 id="trace-heading">Workflow trace</h3>
+              <div class="trace-summary" id="trace-summary"></div>
+            </div>
+            <ol class="trace-nodes" id="trace-nodes"></ol>
+            <p class="hint" id="trace-note" hidden></p>
+          </section>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <dialog id="evidence" aria-labelledby="evidence-title">
+    <div class="evidence-heading">
+      <h2 id="evidence-title">Source evidence</h2>
+      <form method="dialog"><button class="button secondary" type="submit" autofocus>Close</button></form>
+    </div>
+    <p id="evidence-state" role="status"></p>
+    <div id="evidence-detail" hidden>
+      <h3 id="evidence-section"></h3>
+      <dl id="evidence-meta"></dl>
+      <div class="source-text" id="evidence-text"></div>
+    </div>
+  </dialog>
+</body>
+</html>

@@ -1,11 +1,20 @@
 from collections.abc import AsyncIterator
 from contextlib import ExitStack, asynccontextmanager
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
-from src.api.schemas import DiagnoseRequest, DiagnoseResponse, HealthResponse
+from src.api.schemas import (
+    ChunkDetailResponse,
+    DiagnoseRequest,
+    DiagnoseResponse,
+    HealthResponse,
+    MetaResponse,
+)
 from src.api.service import DiagnosticService, IndexNotReady
 from src.core.embedding import create_embedding_client
 from src.core.exceptions import (
@@ -18,6 +27,8 @@ from src.core.llm import create_llm_client
 from src.core.reranker import create_reranker
 from src.core.settings import Settings, load_settings
 from src.retrieval.index import IndexManifest
+
+_STATIC_DIR = Path(__file__).with_name("static")
 
 
 def _service(request: Request) -> DiagnosticService:
@@ -43,10 +54,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             yield
 
     app = FastAPI(title="DiagAgent-RAG", version="1.0", lifespan=lifespan)
+    app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
+
+    @app.get("/", include_in_schema=False)
+    def demo() -> FileResponse:
+        return FileResponse(_STATIC_DIR / "index.html", media_type="text/html")
 
     @app.get("/health", response_model=HealthResponse)
     def health(service: Service) -> HealthResponse:
         return service.health()
+
+    @app.get("/v1/meta", response_model=MetaResponse)
+    def meta(service: Service) -> MetaResponse:
+        return service.meta()
+
+    @app.get("/v1/chunks/{chunk_id:path}", response_model=ChunkDetailResponse)
+    def chunk_detail(chunk_id: str, service: Service) -> ChunkDetailResponse:
+        try:
+            chunk = service.chunk_detail(chunk_id)
+        except IndexNotReady as exc:
+            raise HTTPException(503, str(exc)) from exc
+        if chunk is None:
+            raise HTTPException(404, "The chunk is not in the active index.")
+        return chunk
 
     @app.post("/v1/ingest", response_model=IndexManifest)
     def ingest(service: Service) -> IndexManifest:

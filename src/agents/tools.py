@@ -101,6 +101,29 @@ class DiagnosticTools:
             _parse_rules(sources, SENSOR_TABLE, parse_json_records, SensorThresholdRule),
         )
 
+    @property
+    def equipment_ids(self) -> tuple[str, ...]:
+        return tuple(sorted(self._equipment.values(), key=str.casefold))
+
+    @property
+    def fault_codes_by_equipment(self) -> dict[str, tuple[str, ...]]:
+        groups: dict[str, list[str]] = {}
+        for variants in self._fault_codes.values():
+            for asset, rule in variants.items():
+                groups.setdefault(self._equipment[asset], []).append(rule.fault_code)
+        return {
+            asset: tuple(sorted(groups[asset], key=str.casefold))
+            for asset in self.equipment_ids
+            if asset in groups
+        }
+
+    @property
+    def sensor_rules(self) -> tuple[SensorThresholdRule, ...]:
+        rules = (rule for variants in self._thresholds.values() for rule in variants.values())
+        return tuple(
+            sorted(rules, key=lambda rule: (rule.equipment_id.casefold(), rule.sensor.casefold()))
+        )
+
     def equipment_for(self, request: DiagnosticRequest) -> str | None:
         if request.equipment_id is not None:
             return request.equipment_id

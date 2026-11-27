@@ -1,9 +1,14 @@
 import json
-from contextlib import suppress
+import re
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
+from os import name as os_name
 from pathlib import Path
+from shutil import rmtree
+from stat import FILE_ATTRIBUTE_REPARSE_POINT, S_ISDIR
 from typing import Annotated, BinaryIO, Literal
 from uuid import uuid4
 
@@ -18,6 +23,7 @@ _FORMAT_VERSION = 1
 _CHUNKS_FILE = "chunks.jsonl"
 _VECTORS_FILE = "vectors.faiss"
 _MANIFEST_FILE = "manifest.json"
+_GENERATION_ID = r"^[0-9a-f]{32}$"
 _IDENTITY_FIELDS = {
     "format_version",
     "embedding_provider",
@@ -49,7 +55,7 @@ class IndexManifest(BaseModel):
     chunk_overlap: int = Field(ge=0)
     corpus_hash: SHA256
     created_at: AwareDatetime
-    generation: str = Field(pattern=r"^[0-9a-f]{32}$")
+    generation: str = Field(pattern=_GENERATION_ID)
     chunk_count: int = Field(gt=0)
     vectors_sha256: SHA256
     chunks_sha256: SHA256
@@ -96,6 +102,30 @@ def _artifact_hash(path: Path) -> str:
         return _digest(stream)
 
 
+@contextmanager
+def _index_write_lock(index_dir: Path) -> Iterator[None]:
+    """Serialize generation publication and pruning across local processes."""
+    index_dir.mkdir(parents=True, exist_ok=True)
+    with (index_dir / ".index-write.lock").open("a+b") as lock:
+        if os_name == "nt":
+            import msvcrt
+
+            lock.seek(0)
+            msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+
+
 def save_index(
     index_dir: Path,
     vectors: faiss.IndexFlatIP,
@@ -114,6 +144,23 @@ def save_index(
     if len({chunk.chunk_id for chunk in chunks}) != len(chunks):
         raise IndexValidationError("Chunk IDs must be unique")
 
+    try:
+        with _index_write_lock(index_dir):
+            return _publish_generation(
+                index_dir, vectors, chunks, corpus_hash, embedding, ingestion
+            )
+    except (OSError, RuntimeError, ValidationError) as exc:
+        raise IndexValidationError(f"Could not publish index in {index_dir}") from exc
+
+
+def _publish_generation(
+    index_dir: Path,
+    vectors: faiss.IndexFlatIP,
+    chunks: tuple[Chunk, ...],
+    corpus_hash: str,
+    embedding: EmbeddingSettings,
+    ingestion: IngestionSettings,
+) -> IndexManifest:
     generation = uuid4().hex
     artifacts = index_dir / "generations" / generation
     staged_manifest = index_dir / f".manifest-{generation}.tmp"
@@ -151,8 +198,6 @@ def save_index(
         staged_manifest.replace(index_dir / _MANIFEST_FILE)
         published = True
         return manifest
-    except (OSError, RuntimeError, ValidationError) as exc:
-        raise IndexValidationError(f"Could not publish index in {index_dir}") from exc
     finally:
         if created_generation and not published:
             for path in (staged_manifest, vectors_path, chunks_path):
@@ -162,6 +207,49 @@ def save_index(
                 artifacts.rmdir()
 
 
+def _read_manifest(index_dir: Path) -> IndexManifest:
+    try:
+        return IndexManifest.model_validate_json((index_dir / _MANIFEST_FILE).read_bytes())
+    except (OSError, ValidationError) as exc:
+        raise IndexValidationError(f"Invalid or missing manifest in {index_dir}: {exc}") from exc
+
+
+def prune_generations(index_dir: Path, *, keep_latest: int = 1) -> list[str]:
+    """Keep the active generation and the newest ``keep_latest`` historical generations."""
+    if keep_latest < 0:
+        raise ValueError("keep_latest must be nonnegative")
+    generations = index_dir / "generations"
+    try:
+        try:
+            directory = generations.lstat()
+        except FileNotFoundError:
+            return []
+        if not S_ISDIR(directory.st_mode) or (
+            getattr(directory, "st_file_attributes", 0) & FILE_ATTRIBUTE_REPARSE_POINT
+        ):
+            raise IndexValidationError("The generations path must be a regular directory")
+
+        with _index_write_lock(index_dir):
+            active = _read_manifest(index_dir).generation
+            history = []
+            for entry in generations.iterdir():
+                if entry.name == active or not re.fullmatch(_GENERATION_ID, entry.name):
+                    continue
+                info = entry.lstat()
+                if S_ISDIR(info.st_mode) and not (
+                    getattr(info, "st_file_attributes", 0) & FILE_ATTRIBUTE_REPARSE_POINT
+                ):
+                    history.append((info.st_mtime_ns, entry.name, entry))
+
+            removed = []
+            for _, generation, entry in sorted(history, reverse=True)[keep_latest:]:
+                rmtree(entry)
+                removed.append(generation)
+            return removed
+    except OSError as exc:
+        raise IndexValidationError(f"Could not prune generations in {index_dir}") from exc
+
+
 def load_index(
     index_dir: Path,
     embedding: EmbeddingSettings,
@@ -169,11 +257,26 @@ def load_index(
     *,
     expected_corpus_hash: str | None = None,
 ) -> StoredIndex:
+    manifest = _read_manifest(index_dir)
     try:
-        manifest = IndexManifest.model_validate_json((index_dir / _MANIFEST_FILE).read_bytes())
-    except (OSError, ValidationError) as exc:
-        raise IndexValidationError(f"Invalid or missing manifest in {index_dir}: {exc}") from exc
+        return _load_generation(index_dir, manifest, embedding, ingestion, expected_corpus_hash)
+    except IndexValidationError as exc:
+        if not isinstance(exc.__cause__, FileNotFoundError):
+            raise
+        # The previous generation can be pruned while a reader is opening its artifacts.
+        current = _read_manifest(index_dir)
+        if current.generation == manifest.generation:
+            raise
+        return _load_generation(index_dir, current, embedding, ingestion, expected_corpus_hash)
 
+
+def _load_generation(
+    index_dir: Path,
+    manifest: IndexManifest,
+    embedding: EmbeddingSettings,
+    ingestion: IngestionSettings,
+    expected_corpus_hash: str | None,
+) -> StoredIndex:
     expected = _profile_identity(embedding, ingestion)
     if expected_corpus_hash is not None:
         expected["corpus_hash"] = expected_corpus_hash

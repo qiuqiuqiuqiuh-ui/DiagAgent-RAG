@@ -3,6 +3,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from pathlib import Path
+from runpy import run_path
 from shutil import copytree
 from threading import Event
 
@@ -15,7 +16,7 @@ from src.agents.tools import DiagnosticTools
 from src.agents.workflow import DiagnosticWorkflow
 from src.api.app import create_app
 from src.api.cache import CacheScope, SQLiteSemanticCache, context_hash, profile_hash
-from src.core.settings import Settings, load_settings
+from src.core.settings import LLMSettings, Settings, load_settings
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -130,6 +131,43 @@ def test_api_ingestion_cold_cached_and_validation(api_settings: Settings) -> Non
     with TestClient(create_app(api_settings)) as restarted:
         assert restarted.get("/health").json()["status"] == "ok"
         assert restarted.post("/v1/diagnose", json=query).json()["cache_hit"]
+
+
+def test_diagnostic_cache_profile_isolates_answer_providers_and_ignores_judge(
+    api_settings: Settings,
+) -> None:
+    mock_hash = profile_hash(api_settings)
+    api_settings.llm.provider = "openai_compatible"
+    live_hash = profile_hash(api_settings)
+    assert live_hash != mock_hash
+
+    api_settings.judge_llm = LLMSettings(provider="openai_compatible", model="judge-a")
+    assert profile_hash(api_settings) == live_hash
+    api_settings.judge_llm.model = "judge-b"
+    assert profile_hash(api_settings) == live_hash
+
+
+@pytest.mark.parametrize("role", ["LLM", "EMBEDDING"])
+def test_run_api_reports_missing_openai_key_before_uvicorn(
+    role: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv(f"DIAGAGENT_{role}__PROVIDER", "openai_compatible")
+
+    def unexpected_start(*args: object, **kwargs: object) -> None:
+        pytest.fail("Uvicorn started with missing model credentials")
+
+    monkeypatch.setattr("uvicorn.run", unexpected_start)
+    run_api = run_path(str(ROOT / "scripts" / "run_api.py"))["main"]
+    assert (
+        run_api(
+            ["--config", str(ROOT / "configs" / "default.yaml"), "--project-root", str(tmp_path)]
+        )
+        == 1
+    )
+    captured = capsys.readouterr()
+    assert captured.err == (
+        f"API startup failed: Set DIAGAGENT_{role}__API_KEY for the OpenAI-compatible provider.\n"
+    )
 
 
 @pytest.mark.parametrize("provider", ["embedding", "reranker"])

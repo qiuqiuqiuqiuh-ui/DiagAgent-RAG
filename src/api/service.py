@@ -1,13 +1,22 @@
 import logging
 import sqlite3
+from collections.abc import Mapping
 from dataclasses import dataclass
 from threading import Lock
 from time import perf_counter
+from types import MappingProxyType
 
 from src.agents.tools import RULE_TABLES, DiagnosticTools
 from src.agents.workflow import DiagnosticWorkflow, create_diagnostic_workflow
 from src.api.cache import CacheScope, SQLiteSemanticCache, context_hash, profile_hash
-from src.api.schemas import DiagnoseRequest, DiagnoseResponse, HealthResponse
+from src.api.schemas import (
+    ChunkDetailResponse,
+    DiagnoseRequest,
+    DiagnoseResponse,
+    DomainMetadata,
+    HealthResponse,
+    MetaResponse,
+)
 from src.core.embedding import BaseEmbeddingClient
 from src.core.exceptions import CorpusError, DiagAgentError, IndexValidationError, ModelClientError
 from src.core.llm import BaseLLMClient
@@ -16,6 +25,7 @@ from src.core.reranker import BaseReranker
 from src.core.settings import Settings
 from src.ingestion.corpus import read_corpus
 from src.ingestion.pipeline import build_index
+from src.ingestion.schemas import Chunk
 from src.retrieval.hybrid import HybridRetriever
 from src.retrieval.index import IndexManifest, load_index
 
@@ -31,6 +41,7 @@ class _Snapshot:
     manifest: IndexManifest
     tools: DiagnosticTools
     workflow: DiagnosticWorkflow
+    chunks_by_id: Mapping[str, Chunk]
 
 
 class DiagnosticService:
@@ -71,7 +82,8 @@ class DiagnosticService:
         workflow = create_diagnostic_workflow(
             settings, retriever, llm_client=self._llm, tools=tools
         )
-        return _Snapshot(stored.manifest, tools, workflow)
+        chunks_by_id = MappingProxyType({chunk.chunk_id: chunk for chunk in stored.chunks})
+        return _Snapshot(stored.manifest, tools, workflow, chunks_by_id)
 
     def load_existing(self) -> None:
         if not (self._settings.paths.index_dir / "manifest.json").exists():
@@ -92,6 +104,34 @@ class DiagnosticService:
             index_version=snapshot.manifest.index_version,
             chunk_count=snapshot.manifest.chunk_count,
         )
+
+    def meta(self) -> MetaResponse:
+        settings = self._settings
+        snapshot = self._snapshot
+        tools = snapshot.tools if snapshot is not None else None
+        offline = all(
+            profile.provider == "mock"
+            for profile in (settings.llm, settings.embedding, settings.reranker)
+        )
+        return MetaResponse(
+            domain=DomainMetadata(name=settings.domain.name, language=settings.domain.language),
+            mode="mock" if offline else "live",
+            llm_model=settings.llm.model,
+            embedding_model=settings.embedding.model,
+            reranker_model=settings.reranker.model,
+            equipment_ids=tools.equipment_ids if tools is not None else (),
+            fault_codes=tools.fault_codes_by_equipment if tools is not None else {},
+            sensors=tools.sensor_rules if tools is not None else (),
+        )
+
+    def chunk_detail(self, chunk_id: str) -> ChunkDetailResponse | None:
+        snapshot = self._snapshot
+        if snapshot is None:
+            raise IndexNotReady(
+                "Build a compatible index with POST /v1/ingest before viewing evidence."
+            )
+        chunk = snapshot.chunks_by_id.get(chunk_id)
+        return ChunkDetailResponse.model_validate(chunk, from_attributes=True) if chunk else None
 
     def ingest(self) -> IndexManifest:
         with self._ingest_lock:

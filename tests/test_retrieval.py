@@ -1,4 +1,7 @@
+import json
+from os import utime
 from pathlib import Path
+from runpy import run_path
 
 import faiss
 import numpy as np
@@ -12,10 +15,11 @@ from src.ingestion.chunking import chunk_sections
 from src.ingestion.corpus import read_corpus
 from src.ingestion.pipeline import build_index
 from src.ingestion.schemas import Section
+from src.retrieval import index as index_module
 from src.retrieval.bm25 import BM25Retriever
 from src.retrieval.dense import DenseRetriever
 from src.retrieval.hybrid import HybridRetriever, reciprocal_rank_fusion
-from src.retrieval.index import IndexManifest, load_index, save_index
+from src.retrieval.index import IndexManifest, load_index, prune_generations, save_index
 from src.retrieval.query import resolve_retrieval_query
 from src.retrieval.tokenizer import tokenize_bm25
 
@@ -198,6 +202,98 @@ def test_index_version_is_stable_across_identical_generations(
             settings.ingestion,
             expected_corpus_hash="0" * 64,
         )
+
+
+def test_prune_generations_keeps_the_active_and_latest_history(
+    indexed_corpus: tuple[Settings, IndexManifest],
+) -> None:
+    settings, first = indexed_corpus
+    index_dir = settings.paths.index_dir
+    with create_embedding_client(settings.embedding) as embedder:
+        latest = build_index(settings, embedder)
+        active = build_index(settings, embedder)
+    history = index_dir / "generations"
+    for manifest, seconds in [(first, 100), (latest, 200), (active, 50)]:
+        utime(history / manifest.generation, (seconds, seconds))
+    unrelated = history / "notes"
+    unrelated.mkdir()
+
+    assert prune_generations(index_dir) == [first.generation]
+    assert set(path.name for path in history.iterdir()) == {
+        latest.generation,
+        active.generation,
+        unrelated.name,
+    }
+    assert prune_generations(index_dir) == []
+    assert prune_generations(index_dir, keep_latest=0) == [latest.generation]
+    assert load_index(index_dir, settings.embedding, settings.ingestion).manifest == active
+
+
+def test_prune_missing_generations_is_idempotent(tmp_path: Path) -> None:
+    index_dir = tmp_path / "missing"
+    assert prune_generations(index_dir) == []
+    assert prune_generations(index_dir, keep_latest=0) == []
+    assert not index_dir.exists()
+    with pytest.raises(ValueError, match="nonnegative"):
+        prune_generations(index_dir, keep_latest=-1)
+
+
+def test_prune_requires_a_valid_active_manifest(
+    indexed_corpus: tuple[Settings, IndexManifest],
+) -> None:
+    settings, active = indexed_corpus
+    index_dir = settings.paths.index_dir
+    (index_dir / "manifest.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(IndexValidationError, match="Invalid or missing manifest"):
+        prune_generations(index_dir, keep_latest=0)
+    assert (index_dir / "generations" / active.generation).is_dir()
+
+
+def test_load_retries_when_a_concurrent_rebuild_prunes_the_previous_generation(
+    indexed_corpus: tuple[Settings, IndexManifest], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings, active = indexed_corpus
+    original = index_module._read_manifest
+
+    def rebuild_after_read(index_dir: Path) -> IndexManifest:
+        previous = original(index_dir)
+        monkeypatch.setattr(index_module, "_read_manifest", original)
+        with create_embedding_client(settings.embedding) as embedder:
+            build_index(settings, embedder)
+        assert prune_generations(index_dir, keep_latest=0) == [active.generation]
+        return previous
+
+    monkeypatch.setattr(index_module, "_read_manifest", rebuild_after_read)
+    loaded = load_index(settings.paths.index_dir, settings.embedding, settings.ingestion)
+    assert loaded.manifest.generation != active.generation
+    assert loaded.manifest.index_version == active.index_version
+
+
+def test_ingest_cli_prunes_only_when_requested(
+    indexed_corpus: tuple[Settings, IndexManifest],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    settings, first = indexed_corpus
+    monkeypatch.setenv("DIAGAGENT_PATHS__CORPUS_DIR", str(settings.paths.corpus_dir))
+    monkeypatch.setenv("DIAGAGENT_PATHS__INDEX_DIR", str(settings.paths.index_dir))
+    args = [
+        "--config",
+        str(PROJECT_ROOT / "configs" / "default.yaml"),
+        "--project-root",
+        str(tmp_path),
+    ]
+    ingest = run_path(str(PROJECT_ROOT / "scripts" / "ingest.py"))["main"]
+    assert ingest(args) == 0
+    second = json.loads(capsys.readouterr().out)
+    generations = settings.paths.index_dir / "generations"
+    assert (generations / first.generation).is_dir()
+    assert (generations / second["generation"]).is_dir()
+    assert ingest([*args, "--prune-generations", "0"]) == 0
+    captured = capsys.readouterr()
+    assert "Pruned 2 historical index generation(s)." in captured.err
+    assert [path.name for path in generations.iterdir()] == [json.loads(captured.out)["generation"]]
 
 
 def test_embedding_provider_must_match_profile_and_index(

@@ -58,6 +58,35 @@ def test_equipment_codes_and_lexical_components() -> None:
     ]
 
 
+def test_bilingual_bm25_separates_cjk_terms_and_keeps_industrial_codes() -> None:
+    query = "DRV-300加速过流VFD-OC3怎么排查？"
+    tokens = tokenize_bm25(query)
+    assert {"drv-300", "vfd-oc3", "加速", "过流", "排查", "流"} <= set(tokens)
+    assert "drv-300加速过流vfd-oc3怎么排查" not in tokens
+    assert tokenize_bm25("轴承6205-2RS/C3，PM-14 液位1.39") == [
+        "轴",
+        "承",
+        "轴承",
+        "6205-2rs/c3",
+        "pm-14",
+        "液",
+        "位",
+        "液位",
+        "1.39",
+    ]
+    settings = IngestionSettings(chunk_size=100, chunk_overlap=0)
+    chunks = [
+        chunk_sections(path, [Section(title=title, text=body)], settings)[0]
+        for path, title, body in [
+            ("other.md", "DRV-300", "VFD-UV1 表示直流母线欠压。"),
+            ("target.md", "DRV-300", "VFD-OC3 加速过流故障，检查启动斜坡和电流。"),
+            ("bearings.md", "轴承维护", "遵守润滑周期要求。"),
+            ("pump.md", "离心泵", "测量输出压力。"),
+        ]
+    ]
+    assert BM25Retriever(chunks).search(query, top_k=1)[0].chunk == chunks[1]
+
+
 def test_code_fallback_agrees_between_bm25_and_mock_reranker() -> None:
     chunks = chunk_sections(
         "drive.md",

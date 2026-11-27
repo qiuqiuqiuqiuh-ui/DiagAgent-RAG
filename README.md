@@ -188,6 +188,97 @@ For a CLI rebuild with cleanup, run `python scripts/ingest.py --prune-generation
 to retain the active generation and the most recently modified historical
 generation. Set the count to `0` to retain only the active generation.
 
+## Onboard a bilingual industrial corpus
+
+### Prepare files and rule tables
+
+Set `paths.corpus_dir` in a copy of `configs/production_bilingual.yaml`, or use
+`DIAGAGENT_PATHS__CORPUS_DIR`. Keep source paths stable after labeling citations.
+Use UTF-8 Markdown, CSV and JSON, or PDFs with extractable text. Prefer names
+such as `manuals/drv-300-service.zh.md` and `manuals/drv-300-service.en.md`.
+Preflight reports empty and oversized files, bad encoding, encrypted PDFs,
+links, and pages with missing PDF text. Its default limit is 50 MiB per file.
+
+The default fault table is `fault_codes.csv` with these columns.
+
+```csv
+fault_code,equipment_id,severity,meaning,first_check,escalation
+VFD-OC3,DRV-300,trip,加速过流,核对电流与速度曲线,复发时交由电气维护
+```
+
+The default `sensor_thresholds.json` accepts an array of records or a `records`
+wrapper. The `equipment_id` and sensor or fault-code pair must be unique.
+Thresholds must be finite JSON numbers. In a `high` rule the critical threshold
+must be above warning. In a `low` rule it must be below warning.
+
+```json
+[{"equipment_id":"CV-40","sensor":"gearbox_oil_pressure","unit":"bar","warning_threshold":1.8,"critical_threshold":1.4,"direction":"low"}]
+```
+
+Configure `rules.fault_codes_path` and `rules.sensor_thresholds_path` for files
+in subdirectories such as `rules/faults.csv`. Use exact corpus-relative paths
+with `/` separators. For a manual-only corpus set
+`rules.allow_missing_rule_tables: true`. Supplied rule files still undergo schema
+validation. Enter sensor readings in their declared units. The tool displays
+`℃`, `°C`, and `degC` as `degC`, keeps `MPa` and `bar` distinct, and retains
+unknown unit labels and numeric thresholds while emitting a warning.
+
+### Import OCR text with page provenance
+
+Run PaddleOCR, MinerU, or another OCR tool upstream. Export each manual as a
+UTF-8 `.md` file under the corpus root. Use a level-two `## Page N` heading for
+each original PDF page and keep the original one-based page numbers. A deeper
+section inherits its enclosing page number in chunks and citations. Store the
+original scan outside the indexed directory.
+
+```markdown
+# DRV-300 维修手册
+
+## Page 12
+
+### VFD-OC3 加速过流
+
+记录电流与速度曲线，核对启动负载和加速时间。
+
+## Page 13
+
+记录同一工况下的复测结果。
+```
+
+### Preflight, evaluate and gate the release
+
+Install the optional `huggingface` extra for the bilingual template and supply
+the answer and Judge credentials through `DIAGAGENT_LLM__API_KEY` and
+`DIAGAGENT_JUDGE_LLM__API_KEY`. Set the approved models and gateways in the
+profile or via environment overrides. The template uses the dense 1024-dimensional
+BGE-M3 embedding and the BGE multilingual reranker.
+[Embedding model card](https://huggingface.co/BAAI/bge-m3) · [Reranker model card](https://huggingface.co/BAAI/bge-reranker-v2-m3)
+
+```powershell
+python scripts/validate_corpus.py --config configs/production_bilingual.yaml
+python scripts/ingest.py --config configs/production_bilingual.yaml
+python scripts/evaluate.py --config configs/production_bilingual.yaml --dataset data/eval/golden_bilingual.jsonl --judge --require-heterogeneous-judge --save-answers
+python scripts/check_eval_gate.py --report '<evaluation.json>' --mode hybrid_rerank
+```
+
+Use an independently labeled JSONL golden set for the target corpus. Target
+70% answerable cases, 10% refusals for missing specifications, 10% refusals for
+ambiguous asset or operating context, and 10% out-of-domain cases. Split both
+refusal groups into distinct case IDs with `category: unanswerable` and
+`expected_status: insufficient_evidence`. Include Chinese, English and mixed
+queries, and annotate exact gold chunk IDs and expected tool outcomes where
+applicable. Keep the release set separate from examples used to tune prompts
+or retrieval. The shipped 54-case English benchmark remains an independent
+regression check for the sample corpus.
+
+The gate uses `hybrid_rerank` by default. It requires status accuracy ≥ 0.98,
+abstention accuracy, citation validity and tool accuracy of 1.0, and both
+faithfulness and Recall@K ≥ 0.95. It returns exit code 1 for a failed or
+unmeasurable check. For frozen answers, pass `--replay '<replay.json>'` with a
+report generated from the same evaluation run and retrieval mode. The gate
+uses the replay's `with_request` scores and requires a valid score for every
+answered case.
+
 ## Evaluation and Colab
 
 Use the current index with either labeled dataset.

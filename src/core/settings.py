@@ -1,5 +1,5 @@
 from collections.abc import Mapping
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Literal
 
 import yaml
@@ -17,6 +17,9 @@ from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, Settings
 from pydantic_settings.exceptions import SettingsError
 
 from src.core.exceptions import ConfigurationError
+
+FAULT_TABLE = "fault_codes.csv"
+SENSOR_TABLE = "sensor_thresholds.json"
 
 
 class ProfileSection(BaseModel):
@@ -51,6 +54,33 @@ class IngestionSettings(ProfileSection):
         if self.chunk_overlap >= self.chunk_size:
             raise ValueError("chunk_overlap must be smaller than chunk_size")
         return self
+
+
+class RulesSettings(ProfileSection):
+    fault_codes_path: str = FAULT_TABLE
+    sensor_thresholds_path: str = SENSOR_TABLE
+    allow_missing_rule_tables: bool = False
+
+    @model_validator(mode="after")
+    def validate_source_paths(self) -> "RulesSettings":
+        for value, suffix in (
+            (self.fault_codes_path, ".csv"),
+            (self.sensor_thresholds_path, ".json"),
+        ):
+            path = PurePosixPath(value)
+            if (
+                path.is_absolute()
+                or path.as_posix() != value
+                or any(part.startswith(".") for part in path.parts)
+                or any(char in value for char in ("\\", ":", "\x00"))
+                or path.suffix.lower() != suffix
+            ):
+                raise ValueError(f"Rule table paths must be corpus-relative {suffix} paths")
+        return self
+
+    @property
+    def source_paths(self) -> tuple[str, str]:
+        return self.fault_codes_path, self.sensor_thresholds_path
 
 
 class RetrievalSettings(ProfileSection):
@@ -112,6 +142,7 @@ class Settings(BaseSettings):
     domain: DomainSettings
     paths: PathSettings
     ingestion: IngestionSettings
+    rules: RulesSettings = Field(default_factory=RulesSettings)
     retrieval: RetrievalSettings = Field(default_factory=RetrievalSettings)
     cache: CacheSettings = Field(default_factory=CacheSettings)
     llm: LLMSettings

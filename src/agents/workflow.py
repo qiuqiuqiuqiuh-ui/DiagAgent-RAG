@@ -348,7 +348,9 @@ def create_diagnostic_workflow(
         raise ConfigurationError("The live diagnostic workflow requires an injected LLM client")
     return DiagnosticWorkflow(
         retriever,
-        tools if tools is not None else DiagnosticTools.from_corpus(settings.paths.corpus_dir),
+        tools
+        if tools is not None
+        else DiagnosticTools.from_corpus(settings.paths.corpus_dir, settings.rules),
         policy,
         initial_top_k=initial_top_k,
     )

@@ -123,6 +123,7 @@ def test_single_arm_scores_a_selected_answer_and_audits_provenance(
     assert result["temperature"] == 0.2 and result["json_mode"] is True
     assert result["judge_prompt_sha256"] == judge_prompt_sha256()
     assert result["answer_run_id"] == report["run_id"] and result["answer_model"] == report["model"]
+    assert result["answer_mode"] == report["mode"]
     assert result["answer_report_sha256"] == sha256(answers_path.read_bytes()).hexdigest()
     assert result["dataset_sha256"] == dataset.sha256
     assert result["index_version"] == report["index_version"]

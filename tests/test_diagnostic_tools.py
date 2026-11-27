@@ -7,6 +7,7 @@ from pydantic import ValidationError
 from src.agents.schemas import DiagnosticRequest, FaultCodeFinding, SensorFinding
 from src.agents.tools import DiagnosticTools
 from src.core.exceptions import CorpusError
+from src.core.settings import RulesSettings
 
 CORPUS = Path(__file__).resolve().parents[1] / "data" / "raw"
 
@@ -33,6 +34,75 @@ def test_uses_unambiguous_equipment_code_from_query_for_sensor_lookup() -> None:
     assert isinstance(finding, SensorFinding)
     assert finding.status == "critical"
     assert finding.rule is not None and finding.rule.equipment_id == "PM-14"
+
+
+def test_tools_extract_codes_next_to_chinese_prose() -> None:
+    tools = DiagnosticTools.from_corpus(CORPUS)
+    request = DiagnosticRequest(query="DRV-300加速过流VFD-OC3怎么排查")
+    (finding,) = tools.evaluate(request)
+    assert tools.equipment_for(request) == "DRV-300"
+    assert isinstance(finding, FaultCodeFinding) and finding.status == "found"
+
+
+def test_rule_path_selection_and_sensor_units_preserve_values(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    rule_dir = tmp_path / "tables"
+    rule_dir.mkdir()
+    (rule_dir / "codes.csv").write_bytes((CORPUS / "fault_codes.csv").read_bytes())
+    units = {
+        "temp_cjk": "℃",
+        "temp_symbol": "°C",
+        "temp_ascii": "degC",
+        "mpa": "mpa",
+        "bar": "bar",
+        "custom": "custom unit",
+    }
+    (rule_dir / "levels.json").write_text(
+        json.dumps(
+            [
+                {
+                    "equipment_id": "MX-200",
+                    "sensor": name,
+                    "unit": unit,
+                    "warning_threshold": 100,
+                    "critical_threshold": 120,
+                    "direction": "high",
+                }
+                for name, unit in units.items()
+            ]
+        ),
+        encoding="utf-8",
+    )
+    tools = DiagnosticTools.from_corpus(
+        tmp_path,
+        RulesSettings(
+            fault_codes_path="tables/codes.csv", sensor_thresholds_path="tables/levels.json"
+        ),
+    )
+    findings = tools.evaluate(
+        DiagnosticRequest(query="MX-200", sensor_readings=dict.fromkeys(units, 120))
+    )
+    resolved = {
+        finding.sensor: finding.rule.unit
+        for finding in findings
+        if isinstance(finding, SensorFinding) and finding.rule
+    }
+    assert resolved == {
+        "temp_cjk": "degC",
+        "temp_symbol": "degC",
+        "temp_ascii": "degC",
+        "mpa": "MPa",
+        "bar": "bar",
+        "custom": "custom unit",
+    }
+    assert all(
+        finding.reading == 120 and finding.rule.critical_threshold == 120 for finding in findings
+    )
+    warning = next(
+        record for record in caplog.records if record.message == "rules.unknown_sensor_unit"
+    )
+    assert warning.event_fields["unit"] == "custom unit"
 
 
 @pytest.mark.parametrize(

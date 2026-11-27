@@ -17,6 +17,7 @@ from src.core.exceptions import ConfigurationError, CorpusError, ModelClientErro
 from src.core.llm import BaseLLMClient, create_llm_client
 from src.core.settings import LLMSettings
 from src.evaluation.dataset import EvalCase, EvalDataset
+from src.evaluation.frozen import Mode
 from src.evaluation.runner import judge_faithfulness, judge_gateway, judge_prompt_sha256
 from src.ingestion.schemas import Chunk
 
@@ -45,12 +46,18 @@ class _EvidenceReport(BaseModel):
     rows: tuple[_EvidenceRow, ...]
 
 
+class _AnswerSummary(BaseModel):
+    mode: Mode | None = None
+
+
 class _AnswerReport(BaseModel):
     run_id: NonBlank
     model: NonBlank
     policy_sha256: str | None = None
     dataset_sha256: NonBlank
     index_version: NonBlank
+    mode: Mode | None = None
+    summary: _AnswerSummary | None = None
     rows: tuple[_NestedRow | _PhaseBRow, ...]
 
 
@@ -217,6 +224,8 @@ def replay_judge(
             "judge_prompt_sha256": judge_prompt_sha256(),
             "answer_run_id": answers_report.run_id,
             "answer_model": answers_report.model,
+            "answer_mode": answers_report.mode
+            or (answers_report.summary.mode if answers_report.summary is not None else None),
             "answer_report_sha256": answer_digest,
             "answer_policy_sha256": answers_report.policy_sha256,
             "evidence_report_sha256": [digest for _, digest in sources],

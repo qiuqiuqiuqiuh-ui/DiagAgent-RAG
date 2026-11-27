@@ -1,5 +1,7 @@
 import csv
 import json
+import re
+from dataclasses import dataclass
 from io import BytesIO, StringIO
 from pathlib import Path
 
@@ -12,6 +14,34 @@ from src.ingestion.schemas import Section
 
 SUPPORTED_SUFFIXES = {".md", ".markdown", ".pdf", ".csv", ".json"}
 _MARKDOWN = MarkdownIt("commonmark")
+_PAGE_HEADING = re.compile(r"Page ([1-9][0-9]*)", re.IGNORECASE)
+
+
+class DocumentParseError(CorpusError):
+    def __init__(self, code: str, message: str, *, pages: tuple[int, ...] = ()) -> None:
+        super().__init__(message)
+        self.code = code
+        self.pages = pages
+
+
+@dataclass(frozen=True)
+class ParsedDocument:
+    sections: list[Section]
+    pages_without_text: tuple[int, ...] = ()
+
+
+def _markdown_section(headings: list[tuple[int, str]], title: str, body: str) -> Section:
+    page = next(
+        (
+            int(match[1])
+            for level, name in headings
+            if level == 2 and (match := _PAGE_HEADING.fullmatch(name))
+        ),
+        None,
+    )
+    return Section(
+        title=" > ".join(name for _, name in headings) or title, text=body, page_number=page
+    )
 
 
 def _markdown_sections(text: str, title: str) -> list[Section]:
@@ -27,9 +57,7 @@ def _markdown_sections(text: str, title: str) -> list[Section]:
         heading_start, heading_end = token.map
         body = "\n".join(lines[start:heading_start]).strip()
         if body:
-            sections.append(
-                Section(title=" > ".join(name for _, name in headings) or title, text=body)
-            )
+            sections.append(_markdown_section(headings, title, body))
         level = int(token.tag[1:])
         headings = [(current, name) for current, name in headings if current < level]
         headings.append((level, tokens[index + 1].content.strip() or title))
@@ -37,22 +65,26 @@ def _markdown_sections(text: str, title: str) -> list[Section]:
 
     body = "\n".join(lines[start:]).strip()
     if body:
-        sections.append(Section(title=" > ".join(name for _, name in headings) or title, text=body))
+        sections.append(_markdown_section(headings, title, body))
     return sections
 
 
-def _pdf_sections(content: bytes, title: str) -> list[Section]:
+def _parse_pdf(content: bytes, source_path: str) -> ParsedDocument:
     reader = PdfReader(BytesIO(content))
     if reader.is_encrypted:
-        raise CorpusError("Encrypted PDFs are unsupported")
+        raise DocumentParseError("encrypted_pdf", f"{source_path}: Encrypted PDFs are unsupported")
+    title = Path(source_path).stem
     sections: list[Section] = []
+    empty = []
     for number, page in enumerate(reader.pages, start=1):
         text = (page.extract_text() or "").strip()
         if text:
             sections.append(
                 Section(title=f"{title} > Page {number}", page_number=number, text=text)
             )
-    return sections
+        else:
+            empty.append(number)
+    return ParsedDocument(sections, tuple(empty))
 
 
 def parse_csv_records(text: str) -> list[dict[str, str]]:
@@ -112,15 +144,23 @@ def _table_sections(
     return sections
 
 
-def parse_document(source_path: str, content: bytes) -> list[Section]:
-    """Parse supported UTF-8 documents and extract text from PDF pages."""
+def inspect_document(source_path: str, content: bytes) -> ParsedDocument:
+    """Parse a source once and retain the original PDF pages without extractable text."""
     path = Path(source_path)
     suffix = path.suffix.lower()
+    if not content:
+        raise DocumentParseError("empty_file", f"Empty file {source_path}")
+    pages: tuple[int, ...] = ()
     try:
         if suffix == ".pdf":
-            sections = _pdf_sections(content, path.stem)
+            parsed = _parse_pdf(content, source_path)
+            sections, pages = parsed.sections, parsed.pages_without_text
         else:
             text = content.decode("utf-8-sig")
+            if "\x00" in text:
+                raise DocumentParseError(
+                    "invalid_encoding", f"{source_path}: text contains NUL bytes"
+                )
             if suffix in {".md", ".markdown"}:
                 sections = _markdown_sections(text, path.stem)
             elif suffix == ".csv":
@@ -129,11 +169,29 @@ def parse_document(source_path: str, content: bytes) -> list[Section]:
                 sections = _table_sections(parse_json_records(text), path.stem)
             else:
                 raise CorpusError(f"Unsupported extension {suffix}")
+    except DocumentParseError:
+        raise
+    except UnicodeDecodeError:
+        raise DocumentParseError(
+            "invalid_encoding", f"{source_path}: expected UTF-8 text"
+        ) from None
     except CorpusError as exc:
-        raise CorpusError(f"{source_path}: {exc}") from exc
-    except (ValueError, csv.Error, PyPdfError, DependencyError) as exc:
-        raise CorpusError(f"Could not parse {source_path} ({type(exc).__name__})") from exc
+        raise DocumentParseError("malformed_document", f"{source_path}: {exc}") from exc
+    except (ValueError, OSError, csv.Error, PyPdfError, DependencyError) as exc:
+        raise DocumentParseError(
+            "malformed_document", f"Could not parse {source_path} ({type(exc).__name__})"
+        ) from exc
     if not sections:
-        detail = " (scanned PDFs require OCR upstream)" if suffix == ".pdf" else ""
-        raise CorpusError(f"No searchable text in {source_path}{detail}")
-    return sections
+        if suffix == ".pdf":
+            raise DocumentParseError(
+                "ocr_required",
+                f"No searchable text in {source_path}. Run OCR upstream.",
+                pages=pages,
+            )
+        raise DocumentParseError("empty_file", f"No searchable text in {source_path}")
+    return ParsedDocument(sections, pages)
+
+
+def parse_document(source_path: str, content: bytes) -> list[Section]:
+    """Parse supported UTF-8 documents and extract text from PDF pages."""
+    return inspect_document(source_path, content).sections

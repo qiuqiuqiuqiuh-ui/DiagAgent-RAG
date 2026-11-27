@@ -35,6 +35,32 @@ def test_default_and_colab_profiles() -> None:
     assert colab.embedding.device == colab.reranker.device == "cuda"
 
 
+def test_bilingual_production_template_loads_without_credentials() -> None:
+    settings = load_settings(
+        "configs/production_bilingual.yaml", project_root=PROJECT_ROOT, env_file=None
+    )
+    assert (settings.embedding.model, settings.embedding.dimension) == ("BAAI/bge-m3", 1024)
+    assert settings.reranker.model == "BAAI/bge-reranker-v2-m3"
+    assert settings.domain.language == "zh"
+    assert settings.judge_llm is not None and settings.judge_llm.model != settings.llm.model
+    assert settings.judge_llm.api_key is settings.llm.api_key is None
+    assert settings.rules.source_paths == ("fault_codes.csv", "sensor_thresholds.json")
+    assert not settings.rules.allow_missing_rule_tables
+
+
+def test_rule_paths_accept_nested_env_override_and_reject_traversal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DIAGAGENT_RULES__FAULT_CODES_PATH", "rules/codes.csv")
+    monkeypatch.setenv("DIAGAGENT_RULES__ALLOW_MISSING_RULE_TABLES", "true")
+    settings = load_settings(project_root=PROJECT_ROOT, env_file=None)
+    assert settings.rules.source_paths == ("rules/codes.csv", "sensor_thresholds.json")
+    assert settings.rules.allow_missing_rule_tables
+    monkeypatch.setenv("DIAGAGENT_RULES__FAULT_CODES_PATH", "../codes.csv")
+    with pytest.raises(ConfigurationError, match="rules"):
+        load_settings(project_root=PROJECT_ROOT, env_file=None)
+
+
 def test_judge_yaml_and_env_overrides_preserve_diagnostic_cache(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

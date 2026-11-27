@@ -1,0 +1,35 @@
+domain:
+  name: Industrial Equipment Fault Diagnosis and Maintenance
+  language: zh
+paths:
+  corpus_dir: data/raw
+  index_dir: data/index/production-bilingual
+  reports_dir: reports/generated/production-bilingual
+  cache_file: data/cache/production-bilingual.sqlite3
+ingestion:
+  chunk_size: 1000
+  chunk_overlap: 150
+rules:
+  fault_codes_path: fault_codes.csv
+  sensor_thresholds_path: sensor_thresholds.json
+  allow_missing_rule_tables: false
+llm:
+  provider: openai_compatible
+  model: gpt-4o-mini
+  base_url: https://api.openai.com/v1
+  temperature: 0
+  json_mode: true
+judge_llm:
+  provider: openai_compatible
+  model: gpt-4.1-mini
+  base_url: https://api.openai.com/v1
+  temperature: 0
+  json_mode: true
+embedding:
+  provider: sentence_transformers
+  model: BAAI/bge-m3
+  dimension: 1024
+reranker:
+  provider: sentence_transformers
+  model: BAAI/bge-reranker-v2-m3
+log_level: INFO

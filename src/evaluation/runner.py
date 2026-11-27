@@ -11,7 +11,7 @@ from typing import Literal
 from pydantic import AnyHttpUrl, AwareDatetime, BaseModel, Field, ValidationError
 
 from src.agents.schemas import DiagnosticRequest, DiagnosticResult
-from src.agents.tools import RULE_TABLES, DiagnosticTools
+from src.agents.tools import DiagnosticTools
 from src.agents.workflow import create_diagnostic_workflow
 from src.core.embedding import create_embedding_client
 from src.core.exceptions import ConfigurationError, CorpusError, ModelClientError
@@ -153,8 +153,10 @@ def evaluate(
             raise ConfigurationError("The judge model must differ from the answer model")
         judge_gateway(judge_cfg.base_url)
 
-    corpus = read_corpus(settings.paths.corpus_dir, settings.ingestion, capture=RULE_TABLES)
-    tools = DiagnosticTools.from_sources(corpus.captured_sources)
+    corpus = read_corpus(
+        settings.paths.corpus_dir, settings.ingestion, capture=settings.rules.source_paths
+    )
+    tools = DiagnosticTools.from_sources(corpus.captured_sources, settings.rules)
     stored = load_index(
         settings.paths.index_dir,
         settings.embedding,

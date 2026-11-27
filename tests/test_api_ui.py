@@ -123,3 +123,26 @@ def test_demo_static_resources_and_diagnosis_to_source(demo_settings: Settings) 
             chunk = client.get(f"/v1/chunks/{quoted_id}")
             assert chunk.status_code == 200 and chunk.json()["text"]
             assert chunk.json()["source_path"] == citation["source_path"]
+
+
+def test_manual_only_corpus_requires_explicit_rule_opt_out(demo_settings: Settings) -> None:
+    for rule_path in demo_settings.rules.source_paths:
+        (demo_settings.paths.corpus_dir / rule_path).unlink()
+    with TestClient(create_app(demo_settings)) as strict:
+        assert strict.post("/v1/ingest").status_code == 422
+        assert strict.get("/health").json()["status"] == "not_ready"
+
+    demo_settings.rules.allow_missing_rule_tables = True
+    with TestClient(create_app(demo_settings)) as client:
+        assert client.post("/v1/ingest").status_code == 200
+        assert client.get("/v1/meta").json()["equipment_ids"] == []
+        response = client.post(
+            "/v1/diagnose", json={"query": "What does VFD-OC3 mean?", "equipment_id": "DRV-300"}
+        )
+        assert response.status_code == 200
+        answer = response.json()
+        assert answer["status"] == "answered"
+        assert "overcurrent" in answer["answer"].lower()
+        assert any(
+            citation["source_path"] == "manuals/vfd_faults.md" for citation in answer["citations"]
+        )

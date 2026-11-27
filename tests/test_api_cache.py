@@ -95,6 +95,27 @@ def test_context_hash_keeps_precision_and_entities(api_settings: Settings) -> No
     assert original != profile_hash(api_settings)
 
 
+@pytest.mark.parametrize(
+    ("left", "right"),
+    [
+        ("油压高于 1.8 bar", "油压低于 1.8 bar"),
+        ("油压未超过1.8bar", "油压超过1.8bar"),
+        ("温度-10℃", "温度10℃"),
+        ("温度≥10℃", "温度≤10℃"),
+        ("温度为10摄氏度", "温度为10华氏度"),
+        ("PM-14 120℃", "PM-14 120℉"),
+        ("Motor temp 120℃", "Motor temp 120℉"),
+        ("Motor temp −10 degC", "Motor temp 10 degC"),
+        ("Motor pressure 1e−3 bar", "Motor pressure 1e3 bar"),
+    ],
+)
+def test_cache_context_keeps_polarity_numbers_and_units(left: str, right: str) -> None:
+    tools = DiagnosticTools()
+    assert context_hash(DiagnosticRequest(query=left), tools) != context_hash(
+        DiagnosticRequest(query=right), tools
+    )
+
+
 def test_api_ingestion_cold_cached_and_validation(api_settings: Settings) -> None:
     query = {"query": "What does VFD-OC3 mean?", "equipment_id": "DRV-300"}
     with TestClient(create_app(api_settings)) as client:

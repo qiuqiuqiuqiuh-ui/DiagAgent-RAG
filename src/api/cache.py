@@ -11,17 +11,23 @@ from numpy.typing import NDArray
 from pydantic import ValidationError
 
 from src.agents.schemas import DiagnosticRequest, DiagnosticResult, FaultCodeFinding, SensorFinding
-from src.agents.tools import DiagnosticTools
+from src.agents.tools import RULE_TABLES, DiagnosticTools
 from src.core.settings import Settings
-from src.core.tokenizer import tokenize_codes
+from src.core.tokenizer import split_cjk_runs, tokenize_codes
 
 _KEY_VERSION = 1
-_NUMBERS = re.compile(r"(?<![\w.])[+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:e[+-]?\d+)?(?![\w.])", re.I)
-_COMPARISONS = re.compile(r"<=|>=|!=|==|[<>=%]")
+_NUMBERS = re.compile(r"(?<![\w.])[+\-−]?(?:\d+(?:\.\d+)?|\.\d+)(?:e[+\-−]?\d+)?(?![\w.])", re.I)
+_MIXED_NUMBERS = re.compile(
+    r"(?<![0-9.])[+\-−]?(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)(?:e[+\-−]?[0-9]+)?", re.I
+)
+_COMPARISONS = re.compile(r"<=|>=|!=|==|[<>=%≤≥≠＜＞]")
 _QUERY_QUALIFIERS = frozenset(
     """above amp amps bar below c celsius critical degc degf f fahrenheit greater higher hz
     k kelvin kw l/min less lower maximum minimum mm/s mpa never no normal not ohm pa psi
     rms rpm volts warning without""".split()
+)
+_CJK_QUALIFIERS = re.compile(
+    r"摄氏度|华氏度|大于|小于|高于|低于|超过|达到|等于|正常|异常|预警|告警|报警|严重|临界|最大|最小|不|未|无|℃|℉"
 )
 
 
@@ -35,6 +41,8 @@ def profile_hash(settings: Settings) -> str:
         include={"domain", "retrieval", "llm", "embedding", "reranker"},
         exclude={"llm": {"api_key"}, "embedding": {"api_key"}},
     )
+    if settings.rules.source_paths != RULE_TABLES:
+        profile["rule_tables"] = settings.rules.source_paths
     policy = "mock-extractive" if settings.llm.provider == "mock" else "llm-critic-v4"
     return _digest({"key_version": _KEY_VERSION, "diagnostic_policy": policy, "profile": profile})
 
@@ -57,21 +65,23 @@ def context_hash(request: DiagnosticRequest, tools: DiagnosticTools) -> str:
         for term in tokenize_codes(request.query)
         if term in _QUERY_QUALIFIERS or any(char.isdigit() for char in term)
     ]
-    return _digest(
-        {
-            "equipment": (tools.equipment_for(request) or "").casefold(),
-            "fault_code": (request.fault_code or "").casefold(),
-            "inferred_faults": [
-                item.fault_code.casefold()
-                for item in findings
-                if isinstance(item, FaultCodeFinding)
-            ],
-            "readings": readings,
-            "query_details": details,
-            "query_numbers": _NUMBERS.findall(request.query.casefold()),
-            "query_comparisons": _COMPARISONS.findall(request.query),
-        }
-    )
+    query = request.query.casefold()
+    mixed = len(split_cjk_runs(query)) > 1
+    context = {
+        "equipment": (tools.equipment_for(request) or "").casefold(),
+        "fault_code": (request.fault_code or "").casefold(),
+        "inferred_faults": [
+            item.fault_code.casefold() for item in findings if isinstance(item, FaultCodeFinding)
+        ],
+        "readings": readings,
+        "query_details": details,
+        "query_numbers": (_MIXED_NUMBERS if mixed else _NUMBERS).findall(query),
+        "query_comparisons": _COMPARISONS.findall(query),
+    }
+    qualifiers = _CJK_QUALIFIERS.findall(query)
+    if qualifiers:
+        context["query_cjk_qualifiers"] = qualifiers
+    return _digest(context)
 
 
 @dataclass(frozen=True)

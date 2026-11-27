@@ -6,7 +6,7 @@ from threading import Lock
 from time import perf_counter
 from types import MappingProxyType
 
-from src.agents.tools import RULE_TABLES, DiagnosticTools
+from src.agents.tools import DiagnosticTools
 from src.agents.workflow import DiagnosticWorkflow, create_diagnostic_workflow
 from src.api.cache import CacheScope, SQLiteSemanticCache, context_hash, profile_hash
 from src.api.schemas import (
@@ -66,8 +66,10 @@ class DiagnosticService:
 
     def _load_snapshot(self, *, rebuild: bool) -> _Snapshot:
         settings = self._settings
-        corpus = read_corpus(settings.paths.corpus_dir, settings.ingestion, capture=RULE_TABLES)
-        tools = DiagnosticTools.from_sources(corpus.captured_sources)
+        corpus = read_corpus(
+            settings.paths.corpus_dir, settings.ingestion, capture=settings.rules.source_paths
+        )
+        tools = DiagnosticTools.from_sources(corpus.captured_sources, settings.rules)
         if rebuild:
             build_index(settings, self._embedding, corpus=corpus)
         stored = load_index(

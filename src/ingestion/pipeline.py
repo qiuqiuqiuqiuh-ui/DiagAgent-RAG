@@ -3,6 +3,7 @@ from time import perf_counter
 
 import faiss
 
+from src.agents.tools import DiagnosticTools
 from src.core.embedding import BaseEmbeddingClient
 from src.core.exceptions import ConfigurationError
 from src.core.logging import log_event
@@ -27,7 +28,10 @@ def build_index(
 
     started = perf_counter()
     if corpus is None:
-        corpus = read_corpus(settings.paths.corpus_dir, settings.ingestion)
+        corpus = read_corpus(
+            settings.paths.corpus_dir, settings.ingestion, capture=settings.rules.source_paths
+        )
+        DiagnosticTools.from_sources(corpus.captured_sources, settings.rules)
     index = faiss.IndexFlatIP(embedder.dimension)
     batch_size = settings.embedding.batch_size
     for offset in range(0, len(corpus.chunks), batch_size):
